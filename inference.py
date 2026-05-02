@@ -291,29 +291,29 @@ def find_text_on_map(ocr_texts, query, threshold=0.5):
     for t in ocr_texts:
         text_lower = t["text"].lower().strip()
         # Skip very short OCR results (noise)
-        if len(text_lower) < 3:
+        if len(text_lower) < 2:
             continue
         # Exact full match
         if query_lower == text_lower:
             score = 1.0
         # Substantial substring match (both must be reasonably long)
-        elif len(query_lower) >= 4 and len(text_lower) >= 4:
+        elif len(query_lower) >= 3 and len(text_lower) >= 3:
             if query_lower in text_lower:
                 score = len(query_lower) / len(text_lower)
-                score = max(score, 0.8)
+                score = max(score, 0.75)
             elif text_lower in query_lower:
                 score = len(text_lower) / len(query_lower)
-                score = max(score, 0.7)
+                score = max(score, 0.65)
             else:
                 score = fuzzy_ratio(query_lower, text_lower)
         else:
             score = fuzzy_ratio(query_lower, text_lower)
-        # Word overlap bonus
-        text_words = set(w for w in text_lower.split() if len(w) > 2)
+        # Word overlap bonus (any single word match is good)
+        text_words = set(w for w in text_lower.split() if len(w) > 1)
         if query_words and text_words:
             word_overlap = len(query_words & text_words) / len(query_words)
-            if word_overlap > 0.3:
-                score = max(score, 0.5 + word_overlap * 0.5)
+            if word_overlap > 0.2:
+                score = max(score, 0.4 + word_overlap * 0.6)
         if score >= threshold:
             matches.append((t, score))
     matches.sort(key=lambda x: -x[1])
@@ -399,6 +399,18 @@ def answer_with_ocr(question, options, ocr_texts, map_h, map_w):
             return top_idx, 0.8
         elif top_score >= 0.8 and gap >= max(0.25, 0.3 - spatial_bonus):
             return top_idx, 0.7
+        elif top_score >= 0.75 and gap >= 0.2:
+            # Lower threshold for borderline cases when spatial confirms
+            if spatial_keywords and top_match:
+                zones = get_spatial_zone(top_match["norm_x"], top_match["norm_y"])
+                if check_spatial_match(spatial_keywords, zones):
+                    return top_idx, 0.65
+        elif top_score >= 0.7 and gap >= 0.25 and spatial_keywords:
+            # Very conservative: only if spatial explicitly confirms
+            if top_match:
+                zones = get_spatial_zone(top_match["norm_x"], top_match["norm_y"])
+                if check_spatial_match(spatial_keywords, zones):
+                    return top_idx, 0.55
 
         return None, 0
 
@@ -797,11 +809,17 @@ def main():
             answer = ocr_answer
             method = f"OCR (conf={ocr_conf:.2f})"
         elif vlm_available:
-            answer, raw = answer_with_vlm(
+            vlm_ans, raw = answer_with_vlm(
                 vlm_model, vlm_processor, pil_image, question, options,
                 ocr_context_str, ocr_texts, map_h, map_w,
             )
-            method = f"VLM ({raw})"
+            # If VLM is unsure (answer=5) but OCR has a low-confidence answer, use it
+            if vlm_ans == 5 and ocr_answer is not None and ocr_conf >= 0.35:
+                answer = ocr_answer
+                method = f"OCR-fallback (conf={ocr_conf:.2f})"
+            else:
+                answer = vlm_ans
+                method = f"VLM ({raw})"
         elif ocr_answer is not None:
             answer = ocr_answer
             method = f"OCR-low (conf={ocr_conf:.2f})"

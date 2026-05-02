@@ -137,10 +137,10 @@ PYTHON_BIN=python3.11 bash setup.bash
 python3.11 inference.py --test_dir <path_to_test_dir>
 ```
 
-Optional smaller VLM for 32-40GB GPU tests:
+Optional explicit stable VLM for 32-48GB GPU tests:
 ```bash
-VLM_MODEL_ID=Qwen/Qwen2.5-VL-32B-Instruct-AWQ bash setup.bash
-QWEN_MAX_PIXELS=1003520 python inference.py --test_dir <path_to_test_dir>
+VLM_MODEL_ID=Qwen/Qwen2.5-VL-7B-Instruct bash setup.bash
+QWEN_MAX_PIXELS=602112 python inference.py --test_dir <path_to_test_dir>
 ```
 
 For grading: the test directory will be provided by the evaluator, e.g.:
@@ -153,22 +153,22 @@ This produces `submission.csv` in the current directory.
 ### What setup.bash does
 - Verifies Python 3.11
 - Installs all dependencies into the current Python environment (see `requirements.txt`)
-- Downloads `Qwen2.5-VL-72B-Instruct-AWQ` model weights locally
+- Downloads `Qwen2.5-VL-7B-Instruct` model weights locally
 - Downloads EasyOCR English assets locally
 - Inference uses local files only (no internet needed after setup)
 
 ### Dependencies
 See `requirements.txt`. Key packages:
 - **PyTorch**: `torch==2.6.0`, `torchvision==0.21.0`, `torchaudio==2.6.0` (CUDA 12.4 wheels, compatible with CUDA 12.6)
-- **Model Loading**: `transformers==4.51.3`, `accelerate==1.6.0`, `huggingface_hub`, `autoawq==0.2.9`
-- **VLM**: `Qwen2.5-VL-72B-Instruct-AWQ`, `qwen-vl-utils==0.0.8`
+- **Model Loading**: `transformers==4.51.3`, `accelerate==1.6.0`, `huggingface_hub`
+- **VLM**: `Qwen2.5-VL-7B-Instruct`, `qwen-vl-utils==0.0.8`
 - **Image Processing**: `opencv-python-headless`, `pillow`
 - **Text Extraction**: `easyocr`
 - **Optimization**: `bitsandbytes` (for 4-bit quantization fallback)
 - **Data**: `pandas`, `numpy`
 
 ## Sources / Citations
-- [Qwen2.5-VL](https://huggingface.co/Qwen/Qwen2.5-VL-72B-Instruct-AWQ) - Vision-language model for map understanding
+- [Qwen2.5-VL](https://huggingface.co/Qwen/Qwen2.5-VL-7B-Instruct) - Vision-language model for map understanding
 - [Qwen2-VL](https://github.com/QwenLM/Qwen2-VL) — Vision-Language Model for map understanding
 - [HuggingFace Transformers](https://github.com/huggingface/transformers)
 - OpenCV for image stitching

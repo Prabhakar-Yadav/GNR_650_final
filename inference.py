@@ -698,13 +698,27 @@ def load_vlm_legacy():
     raise RuntimeError(f"All VLM strategies failed. Last: {last_error}")
 
 
+STABLE_MODEL_ID = "Qwen/Qwen2.5-VL-7B-Instruct"
+
 MODEL_CANDIDATES = [
-    ("Qwen2.5-VL-72B-AWQ", "Qwen2.5-VL-72B-Instruct-AWQ", "Qwen/Qwen2.5-VL-72B-Instruct-AWQ"),
-    ("Qwen2.5-VL-32B-AWQ", "Qwen2.5-VL-32B-Instruct-AWQ", "Qwen/Qwen2.5-VL-32B-Instruct-AWQ"),
-    ("Qwen2-VL-72B-AWQ", "Qwen2-VL-72B-Instruct-AWQ", "Qwen/Qwen2-VL-72B-Instruct-AWQ"),
-    ("Qwen2.5-VL-7B", "Qwen2.5-VL-7B-Instruct", "Qwen/Qwen2.5-VL-7B-Instruct"),
-    ("Qwen2-VL-7B", "Qwen2-VL-7B-Instruct", "Qwen/Qwen2-VL-7B-Instruct"),
+    ("Qwen2.5-VL-7B", "Qwen2.5-VL-7B-Instruct", "Qwen/Qwen2.5-VL-7B-Instruct", False),
+    ("Qwen2-VL-7B", "Qwen2-VL-7B-Instruct", "Qwen/Qwen2-VL-7B-Instruct", False),
+    ("Qwen2.5-VL-32B-AWQ", "Qwen2.5-VL-32B-Instruct-AWQ", "Qwen/Qwen2.5-VL-32B-Instruct-AWQ", True),
+    ("Qwen2.5-VL-72B-AWQ", "Qwen2.5-VL-72B-Instruct-AWQ", "Qwen/Qwen2.5-VL-72B-Instruct-AWQ", True),
+    ("Qwen2-VL-72B-AWQ", "Qwen2-VL-72B-Instruct-AWQ", "Qwen/Qwen2-VL-72B-Instruct-AWQ", True),
 ]
+
+
+def normalize_model_request():
+    requested = os.environ.get("VLM_MODEL_ID", STABLE_MODEL_ID).strip() or STABLE_MODEL_ID
+    allow_awq = os.environ.get("ALLOW_UNSTABLE_AWQ", "0") == "1"
+    if "AWQ" in requested.upper() and not allow_awq:
+        print(
+            f"Requested {requested}, but AWQ is disabled because this AutoAWQ/Triton "
+            f"stack can crash during generation. Using stable {STABLE_MODEL_ID}."
+        )
+        return STABLE_MODEL_ID, allow_awq
+    return requested, allow_awq
 
 
 def unique_paths(paths):
@@ -736,22 +750,72 @@ def load_vlm():
     """Load the best local VLM available without using internet at inference time."""
     from transformers import AutoProcessor
 
+    # Disable Triton AWQ kernel (JIT compile errors on some CUDA versions).
+    os.environ["AWQ_DISABLE_TRITON"] = "1"
+    # Patch GEMM forward to cast bfloat16 -> float16 around the kernel call.
+    # A100 with torch_dtype="auto" loads in bfloat16, but awq_ext only accepts float16.
+    try:
+        from awq.modules.linear.gemm import WQLinear_GEMM
+        _orig_awq_fwd = WQLinear_GEMM.forward
+
+        def _awq_bf16_compat(self, x):
+            cast = x.dtype == torch.bfloat16
+            if cast:
+                x = x.to(torch.float16)
+                if hasattr(self, "scales") and self.scales.dtype == torch.bfloat16:
+                    self.scales = self.scales.to(torch.float16)
+                if hasattr(self, "bias") and self.bias is not None and self.bias.dtype == torch.bfloat16:
+                    self.bias = self.bias.to(torch.float16)
+            out = _orig_awq_fwd(self, x)
+            return out.to(torch.bfloat16) if cast else out
+
+        WQLinear_GEMM.forward = _awq_bf16_compat
+        print("AWQ bfloat16 patch applied")
+    except Exception as _e:
+        print(f"AWQ patch skipped ({_e}), falling back to float16 load")
+
     gpu_mem = get_gpu_memory_gb()
     print(f"GPU memory: {gpu_mem:.1f} GB")
 
+    requested_model, allow_awq = normalize_model_request()
+    requested_dir = requested_model.rstrip("/").split("/")[-1]
     allow_download = os.environ.get("ALLOW_MODEL_DOWNLOAD", "0") == "1"
+    roots = model_weight_roots()
+    print(f"Model weight roots: {[str(r) for r in roots]}")
+
+    ordered_candidates = []
+    for item in MODEL_CANDIDATES:
+        desc, local_dir, repo_id, is_awq = item
+        if requested_model == repo_id or requested_dir == local_dir:
+            ordered_candidates.insert(0, item)
+        else:
+            ordered_candidates.append(item)
+
     strategies = []
-    for desc, local_dir, repo_id in MODEL_CANDIDATES:
+    for desc, local_dir, repo_id, is_awq in ordered_candidates:
+        if is_awq and not allow_awq:
+            continue
         local_path = None
-        for root in model_weight_roots():
+        for root in roots:
             candidate = root / local_dir
             if (candidate / "config.json").exists():
                 local_path = candidate
                 break
         if local_path is not None:
-            strategies.append({"name": str(local_path), "desc": f"{desc} (local)", "local_only": True})
-        elif allow_download:
-            strategies.append({"name": repo_id, "desc": f"{desc} (download allowed)", "local_only": False})
+            print(f"  Found: {local_path}")
+            strategies.append({
+                "name": str(local_path),
+                "desc": f"{desc} (local)",
+                "local_only": True,
+                "is_awq": is_awq,
+            })
+        elif allow_download and (requested_model == repo_id or requested_dir == local_dir):
+            strategies.append({
+                "name": repo_id,
+                "desc": f"{desc} (download allowed)",
+                "local_only": False,
+                "is_awq": is_awq,
+            })
 
     if not strategies:
         raise FileNotFoundError(
@@ -767,9 +831,12 @@ def load_vlm():
         try:
             print(f"Trying: {strat['desc']}...")
             model_cls = resolve_vl_model_class(strat["name"])
+            dtype = torch.float16 if strat.get("is_awq") else (
+                torch.bfloat16 if torch.cuda.is_available() else torch.float32
+            )
             model = model_cls.from_pretrained(
                 strat["name"],
-                torch_dtype="auto",
+                torch_dtype=dtype,
                 device_map="auto",
                 low_cpu_mem_usage=True,
                 trust_remote_code=True,
@@ -782,6 +849,22 @@ def load_vlm():
                 min_pixels=min_pixels,
                 max_pixels=max_pixels,
             )
+            # Repair AWQ integer tensors that may have been cast to float by
+            # torch_dtype. qweight and qzeros must stay int32 for awq_ext.
+            if strat.get("is_awq"):
+                try:
+                    from awq.modules.linear.gemm import WQLinear_GEMM
+                    for module in model.modules():
+                        if isinstance(module, WQLinear_GEMM):
+                            if hasattr(module, "qweight") and module.qweight.dtype != torch.int32:
+                                module.qweight = module.qweight.to(torch.int32)
+                            if hasattr(module, "qzeros") and module.qzeros.dtype != torch.int32:
+                                module.qzeros = module.qzeros.to(torch.int32)
+                            if hasattr(module, "scales") and module.scales.dtype != torch.float16:
+                                module.scales = module.scales.to(torch.float16)
+                    print("AWQ int32 tensors verified/repaired")
+                except Exception as _awq_e:
+                    print(f"AWQ repair skipped: {_awq_e}")
             print(f"VLM loaded: {strat['desc']}")
             return model, processor
         except Exception as e:
@@ -854,19 +937,28 @@ def run_vlm_inference(model, processor, image, prompt_text):
 
 
 def parse_vlm_answer(output_text):
-    """Parse a 1-5 answer from VLM output text."""
+    """Parse a 1-4 answer from VLM output text. Returns 5 only as last resort."""
     text = str(output_text).strip()
-    if text in {"1", "2", "3", "4", "5"}:
+    if text in {"1", "2", "3", "4"}:
         return int(text)
 
     answer_patterns = [
-        r"(?:answer|option|choice|final)\D{0,24}([1-5])\b",
-        r"\b([1-5])\b",
+        r"(?:answer|option|choice|final)\D{0,24}([1-4])\b",
+        r"\b([1-4])\b",
     ]
     for pattern in answer_patterns:
         match = re.search(pattern, text, flags=re.IGNORECASE)
         if match:
             return int(match.group(1))
+
+    option_words = {"one": 1, "two": 2, "three": 3, "four": 4}
+    text_lower = text.lower()
+    for word, val in option_words.items():
+        if word in text_lower:
+            return val
+
+    if text == "5":
+        return 5
     return 5
 
 
@@ -894,9 +986,8 @@ def answer_with_vlm(model, processor, pil_image, question, options, ocr_context=
         f"Pay close attention to ALL text labels on the map, including small ones.{ocr_hint}\n\n"
         f"Question: {question}\n\n"
         f"Options:\n{opt_str}\n\n"
-        f"Think about what is visible on the map. Pick the option that best matches what the map shows. "
-        f"Respond with ONLY a single digit: 1, 2, 3, or 4. "
-        f"If you truly cannot determine the answer, respond with 5."
+        f"You MUST pick exactly one option. Analyze the map carefully, then respond with ONLY "
+        f"a single digit: 1, 2, 3, or 4. Do NOT say anything else."
     )
 
     # Run on full image
@@ -912,17 +1003,20 @@ def answer_with_vlm(model, processor, pil_image, question, options, ocr_context=
                 f"This is a zoomed-in section of a geographic map. Read ALL text labels carefully.{ocr_hint}\n\n"
                 f"Question: {question}\n\n"
                 f"Options:\n{opt_str}\n\n"
-                f"Answer with ONLY a single digit: 1, 2, 3, or 4. If unsure, respond with 5."
+                f"You MUST pick exactly one option. Answer with ONLY a single digit: 1, 2, 3, or 4."
             )
             crop_raw = run_vlm_inference(model, processor, crop, crop_prompt)
             crop_answer = parse_vlm_answer(crop_raw)
 
-    # If both agree, high confidence. If they disagree, prefer full image (more context).
     if crop_answer is not None and crop_answer != 5:
         if crop_answer == full_answer:
             return full_answer, f"VLM-both={full_raw!r}"
         if full_answer == 5:
             return crop_answer, f"VLM-crop={crop_raw!r}"
+        return full_answer, f"VLM-full={full_raw!r},crop={crop_raw!r}"
+
+    if full_answer == 5 and crop_answer is not None:
+        return crop_answer, f"VLM-crop-last={crop_raw!r}"
 
     return full_answer, f"VLM-full={full_raw!r}"
 
@@ -1043,14 +1137,22 @@ def main():
             answer = ocr_answer
             method = f"OCR (conf={ocr_conf:.2f})"
         elif vlm_available:
-            vlm_ans, raw = answer_with_vlm(
-                vlm_model, vlm_processor, pil_image, question, options,
-                ocr_context_str, ocr_texts, map_h, map_w,
-            )
-            # If VLM is unsure (answer=5) but OCR has a low-confidence answer, use it
-            if vlm_ans == 5 and ocr_answer is not None and ocr_conf >= 0.85 and not risky_ocr:
+            try:
+                vlm_ans, raw = answer_with_vlm(
+                    vlm_model, vlm_processor, pil_image, question, options,
+                    ocr_context_str, ocr_texts, map_h, map_w,
+                )
+            except Exception as e:
+                print(f"    VLM failed on {qid}: {type(e).__name__}: {str(e)[:180]}")
+                vlm_available = False
+                vlm_ans, raw = 5, f"VLM-error={type(e).__name__}"
+
+            if vlm_ans == 5 and ocr_answer is not None and ocr_conf >= 0.60:
                 answer = ocr_answer
                 method = f"OCR-fallback (conf={ocr_conf:.2f})"
+            elif vlm_ans == 5 and ocr_answer is not None and ocr_conf >= 0.45:
+                answer = ocr_answer
+                method = f"OCR-emergency (conf={ocr_conf:.2f})"
             else:
                 answer = vlm_ans
                 method = f"VLM ({raw})"
@@ -1062,7 +1164,9 @@ def main():
             method = "SKIP"
 
         print(f"  {qid}: {answer} [{method}]")
-        print(f"    Q: {question}")
+        print(f"    Q: {question[:120]}")
+        if "VLM" in method:
+            print(f"    Raw: {method}")
         results.append({"id": qid, "question_num": qid, "option": answer})
 
     # ── Step 5: Write submission ──────────────────────────────────────────────

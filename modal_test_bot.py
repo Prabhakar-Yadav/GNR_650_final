@@ -153,8 +153,8 @@ def main():
     print("  - All files pre-cached in image")
     print("  - Simulates grading bot behavior")
     print("-" * 80)
-    
-    result = run_inference_bot(test_dir)
+
+    result = run_inference_bot.remote(test_dir)
     
     print("\n" + "="*80)
     print("TEST RESULT")

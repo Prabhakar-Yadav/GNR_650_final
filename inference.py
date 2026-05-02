@@ -593,7 +593,6 @@ def should_defer_ocr_to_vlm(question):
     """Return True for questions where OCR text matches are easy to over-trust."""
     q = f" {question.lower()} "
     risky_patterns = [
-        " near ", " nearby ", " close to ", " adjacent ", " between ",
         " east of ", " west of ", " north of ", " south of ",
         " eastern ", " western ", " northern ", " southern ",
         " north-west", " north west", " south-west", " south west",
@@ -601,9 +600,8 @@ def should_defer_ocr_to_vlm(question):
         " top-left", " top left", " top-right", " top right",
         " bottom-left", " bottom left", " bottom-right", " bottom right",
         " in the north", " in the south", " in the east", " in the west",
-        " shore ", " edge ", " terrain ", " dense ", " color ",
-        " pink ", " red ", " building ", " company ", " infrastructure ",
-        " appears ", " with ", " lies ",
+        " terrain ", " dense ", " color ", " colored ",
+        " pink ", " red ", " infrastructure ", " appears ",
     ]
     if "general direction" in q or " direction of " in q:
         return False
@@ -826,17 +824,39 @@ def load_vlm():
     min_pixels = int(os.environ.get("QWEN_MIN_PIXELS", 256 * 28 * 28))
     max_pixels = int(os.environ.get("QWEN_MAX_PIXELS", 4096 * 28 * 28))
 
+    # Patch AWQ GEMM forward: cast activations bf16->fp16 around the kernel
+    # call. torch_dtype="auto" on A100 gives bf16 activations but the
+    # awq_ext CUDA kernel only accepts fp16. qweight/qzeros must stay int32
+    # (torch_dtype="auto" respects existing int dtypes; torch_dtype=float16
+    # corrupts them in autoawq 0.2.9).
+    try:
+        from awq.modules.linear.gemm import WQLinear_GEMM
+        _orig_gemm_fwd = WQLinear_GEMM.forward.__func__ if hasattr(WQLinear_GEMM.forward, '__func__') else WQLinear_GEMM.forward
+
+        def _fp16_compat_fwd(self, x):
+            needs_cast = x.is_floating_point() and x.dtype != torch.float16
+            if needs_cast:
+                x = x.to(torch.float16)
+                if hasattr(self, "scales") and self.scales.is_floating_point():
+                    self.scales = self.scales.to(torch.float16)
+                if hasattr(self, "bias") and self.bias is not None and self.bias.is_floating_point():
+                    self.bias = self.bias.to(torch.float16)
+            out = _orig_gemm_fwd(self, x)
+            return out.to(torch.bfloat16) if needs_cast else out
+
+        WQLinear_GEMM.forward = _fp16_compat_fwd
+        print("AWQ fp16 activation patch applied")
+    except Exception as _ep:
+        print(f"AWQ activation patch skipped: {_ep}")
+
     last_error = None
     for strat in strategies:
         try:
             print(f"Trying: {strat['desc']}...")
             model_cls = resolve_vl_model_class(strat["name"])
-            dtype = torch.float16 if strat.get("is_awq") else (
-                torch.bfloat16 if torch.cuda.is_available() else torch.float32
-            )
             model = model_cls.from_pretrained(
                 strat["name"],
-                torch_dtype=dtype,
+                torch_dtype="auto",
                 device_map="auto",
                 low_cpu_mem_usage=True,
                 trust_remote_code=True,
@@ -849,22 +869,6 @@ def load_vlm():
                 min_pixels=min_pixels,
                 max_pixels=max_pixels,
             )
-            # Repair AWQ integer tensors that may have been cast to float by
-            # torch_dtype. qweight and qzeros must stay int32 for awq_ext.
-            if strat.get("is_awq"):
-                try:
-                    from awq.modules.linear.gemm import WQLinear_GEMM
-                    for module in model.modules():
-                        if isinstance(module, WQLinear_GEMM):
-                            if hasattr(module, "qweight") and module.qweight.dtype != torch.int32:
-                                module.qweight = module.qweight.to(torch.int32)
-                            if hasattr(module, "qzeros") and module.qzeros.dtype != torch.int32:
-                                module.qzeros = module.qzeros.to(torch.int32)
-                            if hasattr(module, "scales") and module.scales.dtype != torch.float16:
-                                module.scales = module.scales.to(torch.float16)
-                    print("AWQ int32 tensors verified/repaired")
-                except Exception as _awq_e:
-                    print(f"AWQ repair skipped: {_awq_e}")
             print(f"VLM loaded: {strat['desc']}")
             return model, processor
         except Exception as e:
@@ -929,7 +933,7 @@ def run_vlm_inference(model, processor, image, prompt_text):
     ).to(model.device)
 
     with torch.no_grad():
-        generated_ids = model.generate(**inputs, max_new_tokens=16, do_sample=False)
+        generated_ids = model.generate(**inputs, max_new_tokens=32, do_sample=False)
 
     trimmed = [out[len(inp):] for inp, out in zip(inputs.input_ids, generated_ids)]
     return processor.batch_decode(trimmed, skip_special_tokens=True,
@@ -974,51 +978,61 @@ def answer_with_vlm(model, processor, pil_image, question, options, ocr_context=
                      ocr_texts=None, map_h=0, map_w=0):
     opt_str = "\n".join(f"{i+1}. {opt}" for i, opt in enumerate(options))
 
+    # Build a focused OCR hint: only labels that appear in the question or options
     ocr_hint = ""
-    if ocr_context:
-        ocr_hint = (
-            f"\n\nText labels detected on the map via OCR:\n{ocr_context}\n"
-        )
+    if ocr_context and ocr_texts:
+        relevant = []
+        keywords = set()
+        for word in re.findall(r'[A-Z][a-zA-Z]+', question):
+            keywords.add(word.lower())
+        for opt in options:
+            for word in re.findall(r'[A-Z][a-zA-Z]+', opt):
+                keywords.add(word.lower())
+        for t in sorted(ocr_texts, key=lambda x: -x["confidence"])[:120]:
+            if any(kw in t["text"].lower() for kw in keywords) or t["confidence"] >= 0.75:
+                zone = "-".join(get_spatial_zone(t["norm_x"], t["norm_y"]))
+                relevant.append(f'"{t["text"]}" ({zone})')
+        if relevant:
+            ocr_hint = f"\n\nMap text labels (OCR):\n" + ", ".join(relevant[:60]) + "\n"
 
     prompt = (
-        f"You are a geographic map analysis expert. This image shows a detailed map with labeled "
-        f"streets, water bodies, landmarks, institutional buildings, and geographic features. "
-        f"Pay close attention to ALL text labels on the map, including small ones.{ocr_hint}\n\n"
+        f"You are analyzing a detailed geographic map of Mumbai, India. "
+        f"The map shows lakes, roads, buildings, and labeled landmarks.{ocr_hint}\n\n"
         f"Question: {question}\n\n"
         f"Options:\n{opt_str}\n\n"
-        f"You MUST pick exactly one option. Analyze the map carefully, then respond with ONLY "
-        f"a single digit: 1, 2, 3, or 4. Do NOT say anything else."
+        f"Look carefully at the map labels and spatial positions. "
+        f"Respond with ONLY the digit of the correct option: 1, 2, 3, or 4."
     )
 
-    # Run on full image
     full_raw = run_vlm_inference(model, processor, pil_image, prompt)
     full_answer = parse_vlm_answer(full_raw)
 
-    # Also run on a cropped region for potentially better accuracy on small text
+    # Cropped region for small-text questions
     crop_answer = None
+    crop_raw = ""
     if ocr_texts and map_h > 0:
         crop = get_relevant_crop(pil_image, question, options, ocr_texts, map_h, map_w)
         if crop is not None:
             crop_prompt = (
-                f"This is a zoomed-in section of a geographic map. Read ALL text labels carefully.{ocr_hint}\n\n"
+                f"This is a zoomed-in section of a Mumbai geographic map.{ocr_hint}\n\n"
                 f"Question: {question}\n\n"
                 f"Options:\n{opt_str}\n\n"
-                f"You MUST pick exactly one option. Answer with ONLY a single digit: 1, 2, 3, or 4."
+                f"Respond with ONLY the digit of the correct option: 1, 2, 3, or 4."
             )
             crop_raw = run_vlm_inference(model, processor, crop, crop_prompt)
             crop_answer = parse_vlm_answer(crop_raw)
 
-    if crop_answer is not None and crop_answer != 5:
-        if crop_answer == full_answer:
-            return full_answer, f"VLM-both={full_raw!r}"
-        if full_answer == 5:
-            return crop_answer, f"VLM-crop={crop_raw!r}"
-        return full_answer, f"VLM-full={full_raw!r},crop={crop_raw!r}"
-
-    if full_answer == 5 and crop_answer is not None:
-        return crop_answer, f"VLM-crop-last={crop_raw!r}"
-
-    return full_answer, f"VLM-full={full_raw!r}"
+    # Both agree → high confidence
+    if crop_answer is not None and crop_answer == full_answer and crop_answer != 5:
+        return full_answer, f"VLM-both={full_raw!r}"
+    # Full says 5 but crop has answer → use crop
+    if full_answer == 5 and crop_answer is not None and crop_answer != 5:
+        return crop_answer, f"VLM-crop={crop_raw!r}"
+    # Both non-5 but disagree → trust full image (more context)
+    if full_answer != 5:
+        return full_answer, f"VLM-full={full_raw!r}"
+    # Both 5 → return 5
+    return 5, f"VLM-skip full={full_raw!r}"
 
 
 # ═══════════════════════════════════════════════════════════════════════════════

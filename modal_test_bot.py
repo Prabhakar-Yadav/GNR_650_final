@@ -26,7 +26,7 @@ image = (
         "qwen-vl-utils==0.0.8", "pillow", "opencv-python-headless",
         "pandas", "numpy", "easyocr", "bitsandbytes",
     )
-    .pip_install("autoawq==0.2.9")
+    .pip_install("autoawq", "autoawq-kernels")
     .pip_install("transformers==4.51.3")
     .run_commands(
         f"mkdir -p {MODEL_DIR} && python -c \""
@@ -41,12 +41,12 @@ image = (
         "python -c \"import easyocr; easyocr.Reader(['en'], gpu=False, verbose=False)\""
     )
     .add_local_file("inference.py", f"{WORKDIR}/inference.py")
-    .add_local_dir("patches", f"{TEST_DIR}/patches")
-    .add_local_file("test.csv", f"{TEST_DIR}/test.csv")
+    .add_local_dir(r"c:\Users\PRABHAKAR\Documents\GNR_Final_project\test_dir\patches", f"{TEST_DIR}/patches")
+    .add_local_file(r"c:\Users\PRABHAKAR\Documents\GNR_Final_project\test_dir\test.csv", f"{TEST_DIR}/test.csv")
 )
 
 
-@app.function(image=image, gpu="A100", timeout=3600)
+@app.function(image=image, gpu="A100-80GB", timeout=3600)
 def run_inference_bot():
     import subprocess, os
 
@@ -89,11 +89,79 @@ def run_inference_bot():
 
     submission = Path("submission.csv")
     if result.returncode == 0 and submission.exists():
-        lines = submission.read_text().strip().splitlines()
-        print(f"\nsubmission.csv: {len(lines) - 1} answers")
-        for line in lines[:6]:
-            print(f"  {line}")
-        return {"status": "SUCCESS", "rows": len(lines) - 1, "preview": lines[:6]}
+        import csv
+
+        # Read submission
+        preds = {}
+        with open("submission.csv") as f:
+            for row in csv.DictReader(f):
+                preds[row["id"]] = int(row["option"])
+
+        # Read ground truth from test.csv (has correct_answer column)
+        truth = {}
+        test_csv_path = f"{TEST_DIR}/test.csv"
+        with open(test_csv_path) as f:
+            reader = csv.DictReader(f)
+            if "correct_answer" in reader.fieldnames:
+                for row in reader:
+                    truth[row["id"]] = int(row["correct_answer"])
+
+        # Score
+        correct = 0
+        wrong = 0
+        unanswered = 0
+        hallucinated = 0
+        details = []
+
+        for qid in sorted(preds.keys(), key=lambda x: int(x.split("_")[1])):
+            pred = preds[qid]
+            gt = truth.get(qid)
+
+            if gt is None:
+                details.append(f"  {qid}: pred={pred} (no ground truth)")
+                continue
+
+            if pred == 5:
+                unanswered += 1
+                details.append(f"  {qid}: pred=5 (SKIP)  correct={gt}")
+            elif pred not in (1, 2, 3, 4):
+                hallucinated += 1
+                details.append(f"  {qid}: pred={pred} (HALLUCINATED)  correct={gt}")
+            elif pred == gt:
+                correct += 1
+                details.append(f"  {qid}: pred={pred} == {gt} CORRECT")
+            else:
+                wrong += 1
+                details.append(f"  {qid}: pred={pred} != {gt} WRONG")
+
+        total = len(preds)
+        score = correct - 0.25 * wrong - hallucinated
+
+        print("\n" + "=" * 80)
+        print("EVALUATION RESULTS")
+        print("=" * 80)
+        print(f"\n  Total questions : {total}")
+        print(f"  Correct         : {correct}")
+        print(f"  Wrong           : {wrong}")
+        print(f"  Unanswered (5)  : {unanswered}")
+        print(f"  Hallucinated    : {hallucinated}")
+        print(f"\n  Score = {correct} - 0.25*{wrong} - {hallucinated} = {score:.2f} / {total}")
+        print(f"  Accuracy        : {correct}/{total} = {100*correct/total:.1f}%")
+        print("\n" + "-" * 80)
+        print("QUESTION-BY-QUESTION:")
+        for d in details:
+            print(d)
+
+        return {
+            "status": "SUCCESS",
+            "rows": total,
+            "correct": correct,
+            "wrong": wrong,
+            "unanswered": unanswered,
+            "hallucinated": hallucinated,
+            "score": score,
+            "accuracy_pct": round(100 * correct / total, 1) if total else 0,
+        }
 
     return {
         "status": "FAILED",
@@ -114,6 +182,8 @@ def main():
 
     print(json.dumps(result, indent=2))
     if result["status"] == "SUCCESS":
-        print("\nBOT TEST PASSED")
+        print(f"\nBOT TEST PASSED")
+        print(f"  Score: {result.get('score', '?')} / {result.get('rows', '?')}")
+        print(f"  Correct: {result.get('correct', '?')}  Wrong: {result.get('wrong', '?')}  Skipped: {result.get('unanswered', '?')}")
     else:
         print("\nBOT TEST FAILED")

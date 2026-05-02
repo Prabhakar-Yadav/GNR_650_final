@@ -154,4 +154,4 @@ See `requirements.txt`. Key packages:
 ## Sources / Citations
 - [Qwen2-VL](https://github.com/QwenLM/Qwen2-VL) — Vision-Language Model for map understanding
 - [HuggingFace Transformers](https://github.com/huggingface/transformers)
-- OpenCV for image stitching
+- OpenCV for image stitchingRepository cleanup complete.

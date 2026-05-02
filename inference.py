@@ -6,7 +6,6 @@ Outputs: submission.csv in current working directory
 
 import argparse
 import os
-import sys
 import csv
 import math
 import numpy as np
@@ -28,7 +27,6 @@ def load_patches(patches_dir):
 
 
 def rotate_image(img, k):
-    """Rotate image by k*90 degrees clockwise."""
     if k == 0:
         return img
     elif k == 1:
@@ -39,44 +37,146 @@ def rotate_image(img, k):
         return cv2.rotate(img, cv2.ROTATE_90_COUNTERCLOCKWISE)
 
 
-def edge_mse(a, b, side):
-    """
-    Compute MSE between edge of a and matching edge of b.
-    side: 'right' means right edge of a vs left edge of b
-          'bottom' means bottom edge of a vs top edge of b
-    """
-    if side == "right":
-        ea = a[:, -1, :].astype(np.float32)
-        eb = b[:, 0, :].astype(np.float32)
-    elif side == "bottom":
-        ea = a[-1, :, :].astype(np.float32)
-        eb = b[0, :, :].astype(np.float32)
-    return np.mean((ea - eb) ** 2)
+def detect_overlap(patches):
+    """Auto-detect the overlap between adjacent patches by testing powers of 2."""
+    p0 = patches[0]
+    h, w = p0.shape[:2]
+    for ov in [64, 48, 32, 24, 16, 8, 4, 2, 1]:
+        if ov >= w:
+            continue
+        right_strip = p0[:, -ov:, :].astype(np.float32)
+        for idx in range(1, len(patches)):
+            img = patches[idx]
+            for k in range(4):
+                rot = rotate_image(img, k)
+                left_strip = rot[:, :ov, :].astype(np.float32)
+                mse = np.mean((right_strip - left_strip) ** 2)
+                if mse < 1.0:
+                    return ov
+    return 0
 
 
-def stitch_patches(patches, n_rows, n_cols):
+def stitch_patches(patches, n_rows, n_cols, overlap):
     """
-    Greedily stitch patches into an n_rows x n_cols grid.
+    Stitch patches using overlap-based constraint propagation with backtracking.
     patch_0 is always top-left (no rotation).
-    Returns the stitched image.
     """
+    THRESH = 5.0
+    n_patches = len(patches)
+
+    # Precompute edge strips for all patch/rotation combos
+    edges = {}
+    for idx in range(n_patches):
+        img = patches[idx]
+        for k in range(4):
+            rot = rotate_image(img, k)
+            edges[(idx, k)] = (
+                rot[:, :overlap, :].astype(np.float32),   # left
+                rot[:, -overlap:, :].astype(np.float32),  # right
+                rot[:overlap, :, :].astype(np.float32),   # top
+                rot[-overlap:, :, :].astype(np.float32),  # bottom
+            )
+
+    # Build adjacency graph
+    right_adj = {}
+    bottom_adj = {}
+    for idx1 in range(n_patches):
+        for k1 in range(4):
+            key1 = (idx1, k1)
+            _, right1, _, bottom1 = edges[key1]
+            r_matches = []
+            b_matches = []
+            for idx2 in range(n_patches):
+                if idx2 == idx1:
+                    continue
+                for k2 in range(4):
+                    key2 = (idx2, k2)
+                    left2, _, top2, _ = edges[key2]
+                    if np.mean((right1 - left2) ** 2) < THRESH:
+                        r_matches.append(key2)
+                    if np.mean((bottom1 - top2) ** 2) < THRESH:
+                        b_matches.append(key2)
+            right_adj[key1] = r_matches
+            bottom_adj[key1] = b_matches
+
+    # Solve placement with backtracking
+    grid = [[None] * n_cols for _ in range(n_rows)]
+    grid[0][0] = (0, 0)
+
+    def get_candidates(row, col, used_patches):
+        candidates = None
+        if col > 0 and grid[row][col - 1] is not None:
+            left_key = grid[row][col - 1]
+            r_set = set((i, k) for (i, k) in right_adj[left_key] if i not in used_patches)
+            candidates = r_set if candidates is None else candidates & r_set
+        if row > 0 and grid[row - 1][col] is not None:
+            top_key = grid[row - 1][col]
+            b_set = set((i, k) for (i, k) in bottom_adj[top_key] if i not in used_patches)
+            candidates = b_set if candidates is None else candidates & b_set
+        return candidates if candidates is not None else set()
+
+    def solve(pos, used_patches):
+        if pos == n_patches:
+            return True
+        row = pos // n_cols
+        col = pos % n_cols
+        if row == 0 and col == 0:
+            return solve(pos + 1, used_patches)
+        candidates = get_candidates(row, col, used_patches)
+        for cand in candidates:
+            idx, k = cand
+            grid[row][col] = cand
+            used_patches.add(idx)
+            if solve(pos + 1, used_patches):
+                return True
+            used_patches.remove(idx)
+            grid[row][col] = None
+        return False
+
+    used = {0}
+    success = solve(0, used)
+
+    if not success:
+        print("WARNING: Backtracking failed, falling back to greedy.")
+        return stitch_patches_greedy(patches, n_rows, n_cols, overlap)
+
+    # Assemble final image
+    stride = patches[0].shape[0] - overlap
+    height = stride * (n_rows - 1) + patches[0].shape[0]
+    width = stride * (n_cols - 1) + patches[0].shape[1]
+    result = np.zeros((height, width, 3), dtype=np.uint8)
+    for r in range(n_rows):
+        for c in range(n_cols):
+            idx, k = grid[r][c]
+            img = rotate_image(patches[idx], k)
+            y = r * stride
+            x = c * stride
+            result[y:y + img.shape[0], x:x + img.shape[1]] = img
+    return result
+
+
+def stitch_patches_greedy(patches, n_rows, n_cols, overlap):
+    """Fallback greedy stitcher if backtracking fails."""
+    n_patches = len(patches)
     grid = [[None] * n_cols for _ in range(n_rows)]
     used = set()
-
-    # Place patch_0 at top-left without rotation
     grid[0][0] = patches[0]
     used.add(0)
 
-    # Fill positions row by row
+    def edge_mse(a, b, side):
+        if side == "right":
+            ea = a[:, -overlap:, :].astype(np.float32)
+            eb = b[:, :overlap, :].astype(np.float32)
+        elif side == "bottom":
+            ea = a[-overlap:, :, :].astype(np.float32)
+            eb = b[:overlap, :, :].astype(np.float32)
+        return np.mean((ea - eb) ** 2)
+
     for row in range(n_rows):
         for col in range(n_cols):
             if row == 0 and col == 0:
                 continue
-
-            best_idx = None
-            best_rot = 0
-            best_score = float("inf")
-
+            best_idx, best_rot, best_score = None, 0, float("inf")
             for idx, img in patches.items():
                 if idx in used:
                     continue
@@ -84,11 +184,9 @@ def stitch_patches(patches, n_rows, n_cols):
                     rotated = rotate_image(img, k)
                     score = 0.0
                     count = 0
-                    # Check left neighbor
                     if col > 0 and grid[row][col - 1] is not None:
                         score += edge_mse(grid[row][col - 1], rotated, "right")
                         count += 1
-                    # Check top neighbor
                     if row > 0 and grid[row - 1][col] is not None:
                         score += edge_mse(grid[row - 1][col], rotated, "bottom")
                         count += 1
@@ -98,27 +196,29 @@ def stitch_patches(patches, n_rows, n_cols):
                         best_score = score
                         best_idx = idx
                         best_rot = k
-
             if best_idx is not None:
                 grid[row][col] = rotate_image(patches[best_idx], best_rot)
                 used.add(best_idx)
 
-    # Assemble full image
-    rows_imgs = []
-    for row in range(n_rows):
-        row_imgs = [grid[row][col] for col in range(n_cols)]
-        rows_imgs.append(np.concatenate(row_imgs, axis=1))
-    full_map = np.concatenate(rows_imgs, axis=0)
-    return full_map
+    stride = patches[0].shape[0] - overlap
+    height = stride * (n_rows - 1) + patches[0].shape[0]
+    width = stride * (n_cols - 1) + patches[0].shape[1]
+    result = np.zeros((height, width, 3), dtype=np.uint8)
+    for r in range(n_rows):
+        for c in range(n_cols):
+            if grid[r][c] is not None:
+                y = r * stride
+                x = c * stride
+                h, w = grid[r][c].shape[:2]
+                result[y:y + h, x:x + w] = grid[r][c]
+    return result
 
 
 def answer_questions_with_vlm(map_image_path, test_csv_path, model_name=None):
-    """Use a VLM to answer multiple-choice questions about the map."""
+    """Use Qwen2-VL to answer multiple-choice questions about the reconstructed map."""
     from transformers import AutoProcessor, Qwen2VLForConditionalGeneration
     from qwen_vl_utils import process_vision_info
 
-    # Weights are downloaded to ./model_weights/ by setup.bash (same dir inference.py runs from).
-    # No internet is available at inference time, so we must use the local path.
     local_weights = Path("./model_weights/Qwen2-VL-7B-Instruct")
     if model_name is None:
         if local_weights.exists():
@@ -192,7 +292,6 @@ def answer_questions_with_vlm(map_image_path, test_csv_path, model_name=None):
             generated_ids_trimmed, skip_special_tokens=True, clean_up_tokenization_spaces=False
         )[0].strip()
 
-        # Extract the digit answer
         answer = 5
         for ch in output_text:
             if ch in "12345":
@@ -218,14 +317,13 @@ def main():
     patches = load_patches(str(patches_dir))
     n_patches = len(patches)
 
-    # Determine grid dimensions — prefer square, fall back to best rectangle
+    # Determine grid dimensions
     grid_size = int(math.isqrt(n_patches))
     if grid_size * grid_size == n_patches:
         n_rows, n_cols = grid_size, grid_size
     else:
-        # Find the factor pair closest to square
         best = (1, n_patches)
-        for r in range(1, int(n_patches**0.5) + 1):
+        for r in range(1, int(n_patches ** 0.5) + 1):
             if n_patches % r == 0:
                 c = n_patches // r
                 if abs(r - c) < abs(best[0] - best[1]):
@@ -233,8 +331,12 @@ def main():
         n_rows, n_cols = best
     print(f"  {n_patches} patches -> {n_rows}x{n_cols} grid")
 
+    print("Detecting overlap...")
+    overlap = detect_overlap(patches)
+    print(f"  Overlap: {overlap}px")
+
     print("Stitching map...")
-    full_map = stitch_patches(patches, n_rows, n_cols)
+    full_map = stitch_patches(patches, n_rows, n_cols, overlap)
     map_path = "stitched_map.png"
     cv2.imwrite(map_path, full_map)
     print(f"  Saved stitched map: {map_path} ({full_map.shape})")

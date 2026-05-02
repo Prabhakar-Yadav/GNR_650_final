@@ -11,4 +11,3 @@ pandas
 numpy
 easyocr
 bitsandbytes
-autoawq

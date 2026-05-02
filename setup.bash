@@ -44,8 +44,6 @@ conda run -n gnr_project_env pip install \
 # ─── 4. Download model weights (internet available here) ──────────────────────
 # Qwen2-VL-72B-Instruct-AWQ: 4-bit quantized, ~36GB VRAM, fits in L40s 48GB
 # Much better at reading small map text than the 7B model.
-conda run -n gnr_project_env pip install autoawq
-
 conda run -n gnr_project_env python - <<'PYEOF'
 from huggingface_hub import snapshot_download
 import os

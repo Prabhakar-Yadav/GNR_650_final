@@ -38,7 +38,8 @@ conda run -n gnr_project_env pip install \
     opencv-python-headless \
     pandas \
     numpy \
-    easyocr
+    easyocr \
+    bitsandbytes
 
 # ─── 4. Download model weights (internet available here) ──────────────────────
 # Qwen2-VL-72B-Instruct-AWQ: 4-bit quantized, ~36GB VRAM, fits in L40s 48GB

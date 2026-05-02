@@ -589,56 +589,92 @@ def extract_subject_near(question):
 # VLM FALLBACK
 # ═══════════════════════════════════════════════════════════════════════════════
 
-def load_vlm():
-    from transformers import AutoProcessor, Qwen2VLForConditionalGeneration
+def get_gpu_memory_gb():
+    if torch.cuda.is_available():
+        return torch.cuda.get_device_properties(0).total_mem / (1024**3)
+    return 0
 
-    # Try local weights first, then download from HuggingFace on-demand
-    model_options = [
-        ("./model_weights/Qwen2-VL-72B-Instruct-AWQ", "72B-AWQ (local)"),
-        ("./model_weights/Qwen2-VL-7B-Instruct", "7B (local)"),
-        ("Qwen/Qwen2-VL-7B-Instruct", "7B (HuggingFace - downloading)"),
-    ]
+
+def load_vlm():
+    from transformers import AutoProcessor, Qwen2VLForConditionalGeneration, BitsAndBytesConfig
+
+    gpu_mem = get_gpu_memory_gb()
+    print(f"GPU memory: {gpu_mem:.1f} GB")
+
+    # Build loading strategies based on available GPU memory
+    strategies = []
+
+    # Strategy 1: Local 72B AWQ (needs 38GB+)
+    if gpu_mem >= 38:
+        strategies.append({
+            "name": "./model_weights/Qwen2-VL-72B-Instruct-AWQ",
+            "desc": "72B-AWQ (local)",
+            "kwargs": {"torch_dtype": torch.bfloat16, "device_map": "auto"},
+        })
+
+    # Strategy 2: Local 7B full precision (needs 16GB+)
+    if gpu_mem >= 16:
+        strategies.append({
+            "name": "./model_weights/Qwen2-VL-7B-Instruct",
+            "desc": "7B full (local)",
+            "kwargs": {"torch_dtype": torch.bfloat16, "device_map": "auto"},
+        })
+
+    # Strategy 3: 7B with 4-bit quantization (needs 4GB+)
+    if gpu_mem >= 4:
+        bnb_config = BitsAndBytesConfig(
+            load_in_4bit=True,
+            bnb_4bit_compute_dtype=torch.bfloat16,
+            bnb_4bit_use_double_quant=True,
+            bnb_4bit_quant_type="nf4",
+        )
+        strategies.append({
+            "name": "./model_weights/Qwen2-VL-7B-Instruct",
+            "desc": "7B 4-bit (local)",
+            "kwargs": {"quantization_config": bnb_config, "device_map": "auto"},
+        })
+        strategies.append({
+            "name": "Qwen/Qwen2-VL-7B-Instruct",
+            "desc": "7B 4-bit (HuggingFace)",
+            "kwargs": {"quantization_config": bnb_config, "device_map": "auto"},
+        })
+
+    # Strategy 4: 2B model as last GPU resort
+    if gpu_mem >= 2:
+        strategies.append({
+            "name": "Qwen/Qwen2-VL-2B-Instruct",
+            "desc": "2B (HuggingFace)",
+            "kwargs": {"torch_dtype": torch.bfloat16, "device_map": "auto"},
+        })
+
+    # Strategy 5: CPU fallback (always available)
+    strategies.append({
+        "name": "Qwen/Qwen2-VL-2B-Instruct",
+        "desc": "2B CPU (HuggingFace)",
+        "kwargs": {"torch_dtype": torch.float32, "device_map": "cpu"},
+    })
 
     last_error = None
-    for model_name, desc in model_options:
+    for strat in strategies:
         try:
-            print(f"Loading VLM: {desc}...")
+            print(f"Trying: {strat['desc']}...")
             model = Qwen2VLForConditionalGeneration.from_pretrained(
-                model_name,
-                torch_dtype=torch.bfloat16,
-                device_map="auto",
+                strat["name"],
                 low_cpu_mem_usage=True,
                 trust_remote_code=True,
+                **strat["kwargs"],
             )
-            processor = AutoProcessor.from_pretrained(model_name, trust_remote_code=True)
-            print(f"✓ VLM loaded: {desc}")
+            processor = AutoProcessor.from_pretrained(strat["name"], trust_remote_code=True)
+            print(f"✓ VLM loaded: {strat['desc']}")
             return model, processor
-        except RuntimeError as e:
-            if "out of memory" in str(e).lower():
-                print(f"⚠ {desc} too large for GPU, trying CPU...")
-                try:
-                    model = Qwen2VLForConditionalGeneration.from_pretrained(
-                        model_name,
-                        torch_dtype=torch.float32,
-                        device_map="cpu",
-                        trust_remote_code=True,
-                    )
-                    processor = AutoProcessor.from_pretrained(model_name, trust_remote_code=True)
-                    print(f"✓ VLM loaded on CPU: {desc}")
-                    return model, processor
-                except Exception:
-                    last_error = e
-                    continue
-            else:
-                last_error = e
-                continue
         except Exception as e:
+            print(f"✗ {strat['desc']} failed: {str(e)[:100]}")
             last_error = e
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
             continue
 
-    if last_error:
-        raise RuntimeError(f"VLM loading failed: {last_error}")
-    raise FileNotFoundError("Could not load VLM model")
+    raise RuntimeError(f"All VLM strategies failed. Last: {last_error}")
 
 
 def get_relevant_crop(pil_image, question, options, ocr_texts, map_h, map_w):

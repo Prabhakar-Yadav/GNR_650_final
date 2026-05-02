@@ -1,39 +1,31 @@
 #!/bin/bash
-set -e
+set -euo pipefail
 
-# ─── 1. Clone the repository ──────────────────────────────────────────────────
-# IMPORTANT: Replace with your actual public GitHub repo URL before submitting
-REPO_URL="https://github.com/Prabhakar-Yadav/GNR_650_final.git"
-REPO_DIR="gnr_final_project_repo"
+REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+cd "$REPO_DIR"
 
-if [ ! -d "$REPO_DIR" ]; then
-    git clone "$REPO_URL" "$REPO_DIR"
-fi
+ENV_NAME="gnr_project_env"
+MODEL_ID="Qwen/Qwen2.5-VL-72B-Instruct-AWQ"
 
-# Copy inference.py to the working directory so the grader can run:
-#   python inference.py --test_dir <path>
-# from this same directory (where setup.bash lives).
-cp "$REPO_DIR/inference.py" ./inference.py
+echo "Preparing ${ENV_NAME} in ${REPO_DIR}"
 
-# ─── 2. Create conda environment (Python 3.11, name: gnr_project_env) ─────────
-# Remove if already exists (grading system runs conda remove at end, but handle re-runs)
-conda remove --name gnr_project_env --all -y 2>/dev/null || true
-conda create -n gnr_project_env python=3.11 -y
+# Re-create the environment so repeated grading runs start cleanly.
+conda remove --name "$ENV_NAME" --all -y 2>/dev/null || true
+conda create -n "$ENV_NAME" python=3.11 -y
 
-# ─── 3. Install all dependencies ──────────────────────────────────────────────
-conda run -n gnr_project_env pip install --upgrade pip
+conda run -n "$ENV_NAME" python -m pip install --upgrade pip
 
-# PyTorch with CUDA 12.4 wheels (compatible with CUDA 12.6 on the L40s)
-conda run -n gnr_project_env pip install \
-    torch==2.4.1 torchvision==0.19.1 torchaudio==2.4.1 \
+# CUDA 12.4 wheels are compatible with the CUDA 12.6 driver stack on the L40s.
+conda run -n "$ENV_NAME" python -m pip install \
+    torch==2.6.0 torchvision==0.21.0 torchaudio==2.6.0 \
     --index-url https://download.pytorch.org/whl/cu124
 
-# VLM inference stack + utilities
-conda run -n gnr_project_env pip install \
-    transformers==4.46.3 \
-    accelerate==1.1.1 \
+# Install the main inference stack first.
+conda run -n "$ENV_NAME" python -m pip install \
+    transformers==4.51.3 \
+    accelerate==1.6.0 \
     huggingface_hub \
-    qwen-vl-utils \
+    qwen-vl-utils==0.0.8 \
     pillow \
     opencv-python-headless \
     pandas \
@@ -41,23 +33,32 @@ conda run -n gnr_project_env pip install \
     easyocr \
     bitsandbytes
 
-# ─── 4. Download model weights (internet available here) ──────────────────────
-# Qwen2-VL-72B-Instruct-AWQ: 4-bit quantized, ~36GB VRAM, fits in L40s 48GB
-# Much better at reading small map text than the 7B model.
-conda run -n gnr_project_env python - <<'PYEOF'
-from huggingface_hub import snapshot_download
-import os
+# AutoAWQ can change the Transformers version, so force Transformers back to
+# the Qwen2.5-VL-compatible build after AutoAWQ is installed.
+conda run -n "$ENV_NAME" python -m pip install autoawq==0.2.9
+conda run -n "$ENV_NAME" python -m pip install --upgrade --no-deps transformers==4.51.3
 
-# Primary: 72B AWQ (best accuracy for map text reading)
-print("Downloading Qwen2-VL-72B-Instruct-AWQ...")
+echo "Downloading VLM weights: ${MODEL_ID}"
+conda run -n "$ENV_NAME" python - <<'PYEOF'
+from huggingface_hub import snapshot_download
+
 snapshot_download(
-    repo_id="Qwen/Qwen2-VL-72B-Instruct-AWQ",
-    local_dir="./model_weights/Qwen2-VL-72B-Instruct-AWQ",
+    repo_id="Qwen/Qwen2.5-VL-72B-Instruct-AWQ",
+    local_dir="./model_weights/Qwen2.5-VL-72B-Instruct-AWQ",
     ignore_patterns=["*.msgpack", "*.h5", "flax_model*", "*.ot"],
 )
-print("Model weights downloaded successfully.")
+print("Qwen2.5-VL-72B-AWQ weights are ready.")
+PYEOF
+
+echo "Downloading EasyOCR English detection/recognition assets"
+conda run -n "$ENV_NAME" python - <<'PYEOF'
+import easyocr
+
+easyocr.Reader(["en"], gpu=False, verbose=False)
+print("EasyOCR assets are ready.")
 PYEOF
 
 echo ""
-echo "Setup complete. Environment: gnr_project_env | Python 3.11"
-echo "Run: conda activate gnr_project_env && python inference.py --test_dir <path>"
+echo "Setup complete."
+echo "Activate with: conda activate ${ENV_NAME}"
+echo "Run inference: python inference.py --test_dir <absolute_path_to_test_dir>"

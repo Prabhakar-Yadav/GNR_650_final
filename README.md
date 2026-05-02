@@ -119,7 +119,7 @@ Participants must submit a file named submission.csv:
 
 ### Steps
 
-**1. Run setup (clones repo, creates env, downloads weights):**
+**1. Run setup (creates env, installs dependencies, downloads weights):**
 ```bash
 bash setup.bash
 ```
@@ -145,22 +145,24 @@ python inference.py --test_dir ../test_data
 This produces `submission.csv` in the current directory.
 
 ### What setup.bash does
-- Clones this repository
 - Creates conda environment `gnr_project_env` with Python 3.11
 - Installs all dependencies (see `requirements.txt`)
-- Downloads `Qwen2-VL-72B-Instruct-AWQ` model weights locally (no internet needed at inference time)
+- Downloads `Qwen2.5-VL-72B-Instruct-AWQ` model weights locally
+- Downloads EasyOCR English assets locally
+- Inference uses local files only (no internet needed after setup)
 
 ### Dependencies
 See `requirements.txt`. Key packages:
-- **PyTorch**: `torch==2.4.1`, `torchvision==0.19.1`, `torchaudio==2.4.1` (CUDA 12.4 wheels, compatible with CUDA 12.6)
-- **Model Loading**: `transformers==4.46.3`, `accelerate==1.1.1`, `huggingface_hub`
-- **VLM**: `qwen-vl-utils`
+- **PyTorch**: `torch==2.6.0`, `torchvision==0.21.0`, `torchaudio==2.6.0` (CUDA 12.4 wheels, compatible with CUDA 12.6)
+- **Model Loading**: `transformers==4.51.3`, `accelerate==1.6.0`, `huggingface_hub`, `autoawq==0.2.9`
+- **VLM**: `Qwen2.5-VL-72B-Instruct-AWQ`, `qwen-vl-utils==0.0.8`
 - **Image Processing**: `opencv-python-headless`, `pillow`
 - **Text Extraction**: `easyocr`
 - **Optimization**: `bitsandbytes` (for 4-bit quantization fallback)
 - **Data**: `pandas`, `numpy`
 
 ## Sources / Citations
+- [Qwen2.5-VL](https://huggingface.co/Qwen/Qwen2.5-VL-72B-Instruct-AWQ) - Vision-language model for map understanding
 - [Qwen2-VL](https://github.com/QwenLM/Qwen2-VL) — Vision-Language Model for map understanding
 - [HuggingFace Transformers](https://github.com/huggingface/transformers)
-- OpenCV for image stitchingRepository cleanup complete.
+- OpenCV for image stitching

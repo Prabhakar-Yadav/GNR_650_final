@@ -589,13 +589,34 @@ def extract_subject_near(question):
 # VLM FALLBACK
 # ═══════════════════════════════════════════════════════════════════════════════
 
+def should_defer_ocr_to_vlm(question):
+    """Return True for questions where OCR text matches are easy to over-trust."""
+    q = f" {question.lower()} "
+    risky_patterns = [
+        " near ", " nearby ", " close to ", " adjacent ", " between ",
+        " east of ", " west of ", " north of ", " south of ",
+        " eastern ", " western ", " northern ", " southern ",
+        " north-west", " north west", " south-west", " south west",
+        " north-east", " north east", " south-east", " south east",
+        " top-left", " top left", " top-right", " top right",
+        " bottom-left", " bottom left", " bottom-right", " bottom right",
+        " in the north", " in the south", " in the east", " in the west",
+        " shore ", " edge ", " terrain ", " dense ", " color ",
+        " pink ", " red ", " building ", " company ", " infrastructure ",
+        " appears ", " with ", " lies ",
+    ]
+    if "general direction" in q or " direction of " in q:
+        return False
+    return any(pattern in q for pattern in risky_patterns)
+
+
 def get_gpu_memory_gb():
     if torch.cuda.is_available():
-        return torch.cuda.get_device_properties(0).total_mem / (1024**3)
+        return torch.cuda.get_device_properties(0).total_memory / (1024**3)
     return 0
 
 
-def load_vlm():
+def load_vlm_legacy():
     from transformers import AutoProcessor, Qwen2VLForConditionalGeneration, BitsAndBytesConfig
 
     gpu_mem = get_gpu_memory_gb()
@@ -677,6 +698,100 @@ def load_vlm():
     raise RuntimeError(f"All VLM strategies failed. Last: {last_error}")
 
 
+MODEL_CANDIDATES = [
+    ("Qwen2.5-VL-72B-AWQ", "Qwen2.5-VL-72B-Instruct-AWQ", "Qwen/Qwen2.5-VL-72B-Instruct-AWQ"),
+    ("Qwen2-VL-72B-AWQ", "Qwen2-VL-72B-Instruct-AWQ", "Qwen/Qwen2-VL-72B-Instruct-AWQ"),
+    ("Qwen2.5-VL-7B", "Qwen2.5-VL-7B-Instruct", "Qwen/Qwen2.5-VL-7B-Instruct"),
+    ("Qwen2-VL-7B", "Qwen2-VL-7B-Instruct", "Qwen/Qwen2-VL-7B-Instruct"),
+]
+
+
+def unique_paths(paths):
+    seen = set()
+    unique = []
+    for path in paths:
+        resolved = str(path.resolve())
+        if resolved not in seen:
+            seen.add(resolved)
+            unique.append(path)
+    return unique
+
+
+def model_weight_roots():
+    script_dir = Path(__file__).resolve().parent
+    return unique_paths([script_dir / "model_weights", Path.cwd() / "model_weights"])
+
+
+def resolve_vl_model_class(model_name):
+    normalized = str(model_name).replace("_", "-").lower()
+    if "qwen2.5-vl" in normalized:
+        from transformers import Qwen2_5_VLForConditionalGeneration
+        return Qwen2_5_VLForConditionalGeneration
+    from transformers import Qwen2VLForConditionalGeneration
+    return Qwen2VLForConditionalGeneration
+
+
+def load_vlm():
+    """Load the best local VLM available without using internet at inference time."""
+    from transformers import AutoProcessor
+
+    gpu_mem = get_gpu_memory_gb()
+    print(f"GPU memory: {gpu_mem:.1f} GB")
+
+    allow_download = os.environ.get("ALLOW_MODEL_DOWNLOAD", "0") == "1"
+    strategies = []
+    for desc, local_dir, repo_id in MODEL_CANDIDATES:
+        local_path = None
+        for root in model_weight_roots():
+            candidate = root / local_dir
+            if (candidate / "config.json").exists():
+                local_path = candidate
+                break
+        if local_path is not None:
+            strategies.append({"name": str(local_path), "desc": f"{desc} (local)", "local_only": True})
+        elif allow_download:
+            strategies.append({"name": repo_id, "desc": f"{desc} (download allowed)", "local_only": False})
+
+    if not strategies:
+        raise FileNotFoundError(
+            "No local VLM weights found. Run setup.bash first, or set "
+            "ALLOW_MODEL_DOWNLOAD=1 only during a network-enabled setup test."
+        )
+
+    min_pixels = int(os.environ.get("QWEN_MIN_PIXELS", 256 * 28 * 28))
+    max_pixels = int(os.environ.get("QWEN_MAX_PIXELS", 4096 * 28 * 28))
+
+    last_error = None
+    for strat in strategies:
+        try:
+            print(f"Trying: {strat['desc']}...")
+            model_cls = resolve_vl_model_class(strat["name"])
+            model = model_cls.from_pretrained(
+                strat["name"],
+                torch_dtype="auto",
+                device_map="auto",
+                low_cpu_mem_usage=True,
+                trust_remote_code=True,
+                local_files_only=strat["local_only"],
+            )
+            processor = AutoProcessor.from_pretrained(
+                strat["name"],
+                trust_remote_code=True,
+                local_files_only=strat["local_only"],
+                min_pixels=min_pixels,
+                max_pixels=max_pixels,
+            )
+            print(f"VLM loaded: {strat['desc']}")
+            return model, processor
+        except Exception as e:
+            print(f"{strat['desc']} failed: {str(e)[:100]}")
+            last_error = e
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+
+    raise RuntimeError(f"All VLM strategies failed. Last: {last_error}")
+
+
 def get_relevant_crop(pil_image, question, options, ocr_texts, map_h, map_w):
     """Extract a cropped region of the map relevant to the question for better VLM accuracy."""
     all_locs = []
@@ -739,9 +854,18 @@ def run_vlm_inference(model, processor, image, prompt_text):
 
 def parse_vlm_answer(output_text):
     """Parse a 1-5 answer from VLM output text."""
-    for ch in output_text:
-        if ch in "12345":
-            return int(ch)
+    text = str(output_text).strip()
+    if text in {"1", "2", "3", "4", "5"}:
+        return int(text)
+
+    answer_patterns = [
+        r"(?:answer|option|choice|final)\D{0,24}([1-5])\b",
+        r"\b([1-5])\b",
+    ]
+    for pattern in answer_patterns:
+        match = re.search(pattern, text, flags=re.IGNORECASE)
+        if match:
+            return int(match.group(1))
     return 5
 
 
@@ -904,8 +1028,9 @@ def main():
 
         # Try OCR first
         ocr_answer, ocr_conf = answer_with_ocr(question, options, ocr_texts, map_h, map_w)
+        risky_ocr = should_defer_ocr_to_vlm(question)
 
-        if ocr_answer is not None and ocr_conf >= 0.6:
+        if ocr_answer is not None and ocr_conf >= 0.85 and (not risky_ocr or not vlm_available):
             answer = ocr_answer
             method = f"OCR (conf={ocr_conf:.2f})"
         elif vlm_available:
@@ -914,7 +1039,7 @@ def main():
                 ocr_context_str, ocr_texts, map_h, map_w,
             )
             # If VLM is unsure (answer=5) but OCR has a low-confidence answer, use it
-            if vlm_ans == 5 and ocr_answer is not None and ocr_conf >= 0.35:
+            if vlm_ans == 5 and ocr_answer is not None and ocr_conf >= 0.85 and not risky_ocr:
                 answer = ocr_answer
                 method = f"OCR-fallback (conf={ocr_conf:.2f})"
             else:

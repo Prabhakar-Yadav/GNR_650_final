@@ -8,7 +8,6 @@ These are the commands to run from a fresh Linux machine in the same style as th
 git clone https://github.com/Prabhakar-Yadav/GNR_650_final.git
 cd GNR_650_final
 bash setup.bash
-conda activate gnr_project_env
 python inference.py --test_dir /absolute/path/to/test_dir
 ```
 
@@ -50,7 +49,7 @@ PY
 
 ## What setup.bash Downloads
 
-- Python 3.11 conda environment: `gnr_project_env`
+- Dependencies installed into the current Python 3.11 environment
 - PyTorch 2.6 CUDA 12.4 wheels, compatible with CUDA 12.6 drivers
 - Transformers 4.51.3, AutoAWQ 0.2.9, qwen-vl-utils 0.0.8
 - Qwen2.5-VL-72B-Instruct-AWQ weights

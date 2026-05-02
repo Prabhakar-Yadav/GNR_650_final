@@ -115,37 +115,38 @@ Participants must submit a file named submission.csv:
 
 ### Requirements
 - Linux, CUDA 12.6, Python 3.11
-- Conda must be installed
 
 ### Steps
 
-**1. Run setup (creates env, installs dependencies, downloads weights):**
+**1. Run setup (installs dependencies into the current Python environment and downloads weights):**
 ```bash
 bash setup.bash
 ```
 
-**2. Run inference (conda run automatically activates the environment):**
+**2. Run inference:**
 ```bash
-conda run -n gnr_project_env python inference.py --test_dir <path_to_test_dir>
+python inference.py --test_dir <path_to_test_dir>
 ```
 Where `<path_to_test_dir>` is the directory containing `patches/` and `test.csv`.
 
-**OR manually:**
+If the evaluator creates its own Conda/virtual environment, activate that environment before running setup. No project-specific `conda activate` command is required.
+
+Optional explicit Python binary:
 ```bash
-conda activate gnr_project_env
-python inference.py --test_dir <path_to_test_dir>
+PYTHON_BIN=python3.11 bash setup.bash
+python3.11 inference.py --test_dir <path_to_test_dir>
 ```
 
 For grading: the test directory will be provided by the evaluator, e.g.:
 ```bash
-conda run -n gnr_project_env python inference.py --test_dir /grading/test_data
+python inference.py --test_dir /grading/test_data
 ```
 
 This produces `submission.csv` in the current directory.
 
 ### What setup.bash does
-- Creates conda environment `gnr_project_env` with Python 3.11
-- Installs all dependencies (see `requirements.txt`)
+- Verifies Python 3.11
+- Installs all dependencies into the current Python environment (see `requirements.txt`)
 - Downloads `Qwen2.5-VL-72B-Instruct-AWQ` model weights locally
 - Downloads EasyOCR English assets locally
 - Inference uses local files only (no internet needed after setup)

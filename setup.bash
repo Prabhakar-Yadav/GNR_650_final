@@ -4,7 +4,17 @@ set -euo pipefail
 REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$REPO_DIR"
 
-MODEL_ID="${VLM_MODEL_ID:-Qwen/Qwen2.5-VL-72B-Instruct-AWQ}"
+STABLE_MODEL_ID="Qwen/Qwen2.5-VL-7B-Instruct"
+REQUESTED_MODEL_ID="${VLM_MODEL_ID:-$STABLE_MODEL_ID}"
+if [[ "${REQUESTED_MODEL_ID^^}" == *AWQ* && "${ALLOW_UNSTABLE_AWQ:-0}" != "1" ]]; then
+    echo "WARNING: ${REQUESTED_MODEL_ID} is an AWQ model and is disabled by default."
+    echo "The tested AutoAWQ/Triton stack can crash during generation."
+    echo "Using stable ${STABLE_MODEL_ID} instead."
+    echo "Set ALLOW_UNSTABLE_AWQ=1 only if you intentionally want to test AWQ."
+    MODEL_ID="$STABLE_MODEL_ID"
+else
+    MODEL_ID="$REQUESTED_MODEL_ID"
+fi
 MODEL_DIR="${VLM_MODEL_DIR:-./model_weights/${MODEL_ID##*/}}"
 PYTHON_BIN="${PYTHON_BIN:-python}"
 
@@ -50,10 +60,12 @@ PYEOF
     easyocr \
     bitsandbytes
 
-# AutoAWQ can change the Transformers version, so force Transformers back to
-# the Qwen2.5-VL-compatible build after AutoAWQ is installed.
-"$PYTHON_BIN" -m pip install autoawq==0.2.9
-"$PYTHON_BIN" -m pip install --upgrade --no-deps transformers==4.51.3
+if [[ "${MODEL_ID^^}" == *AWQ* ]]; then
+    # AutoAWQ can change the Transformers version, so force Transformers back to
+    # the Qwen2.5-VL-compatible build after AutoAWQ is installed.
+    "$PYTHON_BIN" -m pip install autoawq==0.2.9
+    "$PYTHON_BIN" -m pip install --upgrade --no-deps transformers==4.51.3
+fi
 
 echo "Downloading VLM weights: ${MODEL_ID}"
 export MODEL_ID MODEL_DIR

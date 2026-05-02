@@ -5,10 +5,21 @@ import subprocess
 import modal
 
 
-MODEL_ID = os.environ.get("VLM_MODEL_ID", "Qwen/Qwen2.5-VL-32B-Instruct-AWQ")
+STABLE_MODEL_ID = "Qwen/Qwen2.5-VL-7B-Instruct"
+REQUESTED_MODEL_ID = os.environ.get("VLM_MODEL_ID", STABLE_MODEL_ID)
+ALLOW_UNSTABLE_AWQ = os.environ.get("ALLOW_UNSTABLE_AWQ", "0") == "1"
+if "AWQ" in REQUESTED_MODEL_ID.upper() and not ALLOW_UNSTABLE_AWQ:
+    print(
+        f"Requested {REQUESTED_MODEL_ID}, but AWQ is disabled because the "
+        f"current AutoAWQ/Triton stack crashes during generation. "
+        f"Using stable {STABLE_MODEL_ID}. Set ALLOW_UNSTABLE_AWQ=1 to force AWQ."
+    )
+    MODEL_ID = STABLE_MODEL_ID
+else:
+    MODEL_ID = REQUESTED_MODEL_ID
 GPU = os.environ.get("MODAL_GPU", "A100-40GB")
 TEST_VOLUME_NAME = os.environ.get("MODAL_TEST_VOLUME", "gnr-test-data")
-QWEN_MAX_PIXELS = os.environ.get("QWEN_MAX_PIXELS", str(1024 * 28 * 28))
+QWEN_MAX_PIXELS = os.environ.get("QWEN_MAX_PIXELS", str(768 * 28 * 28))
 PROJECT_DIR = "/root/project"
 
 app = modal.App("gnr-final-offline-bot")

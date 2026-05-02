@@ -10,5 +10,4 @@ opencv-python-headless
 pandas
 numpy
 easyocr
-autoawq==0.2.9
 bitsandbytes

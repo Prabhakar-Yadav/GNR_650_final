@@ -592,43 +592,53 @@ def extract_subject_near(question):
 def load_vlm():
     from transformers import AutoProcessor, Qwen2VLForConditionalGeneration
 
-    # Try 72B first (for L40s 48GB), fall back to 7B (for smaller GPUs)
-    model_paths = [
-        ("./model_weights/Qwen2-VL-72B-Instruct-AWQ", "72B-AWQ"),
-        ("./model_weights/Qwen2-VL-7B-Instruct", "7B"),
+    # Try local weights first, then download from HuggingFace on-demand
+    model_options = [
+        ("./model_weights/Qwen2-VL-72B-Instruct-AWQ", "72B-AWQ (local)"),
+        ("./model_weights/Qwen2-VL-7B-Instruct", "7B (local)"),
+        ("Qwen/Qwen2-VL-7B-Instruct", "7B (HuggingFace - downloading)"),
     ]
 
-    model_name = None
-    for path, name in model_paths:
-        if Path(path).exists():
-            model_name = path
-            print(f"Loading VLM: {name} from {path}")
-            break
-
-    if not model_name:
-        raise FileNotFoundError("Model weights not found. Run setup.bash first.")
-
-    try:
-        model = Qwen2VLForConditionalGeneration.from_pretrained(
-            model_name,
-            torch_dtype=torch.bfloat16,
-            device_map="auto",
-            low_cpu_mem_usage=True,
-        )
-        processor = AutoProcessor.from_pretrained(model_name)
-        return model, processor
-    except RuntimeError as e:
-        if "out of memory" in str(e).lower():
-            print(f"WARNING: Model {model_name} too large for available GPU")
-            print("Falling back to CPU mode (slower but will work)...")
+    last_error = None
+    for model_name, desc in model_options:
+        try:
+            print(f"Loading VLM: {desc}...")
             model = Qwen2VLForConditionalGeneration.from_pretrained(
                 model_name,
-                torch_dtype=torch.float32,
-                device_map="cpu",
+                torch_dtype=torch.bfloat16,
+                device_map="auto",
+                low_cpu_mem_usage=True,
+                trust_remote_code=True,
             )
-            processor = AutoProcessor.from_pretrained(model_name)
+            processor = AutoProcessor.from_pretrained(model_name, trust_remote_code=True)
+            print(f"✓ VLM loaded: {desc}")
             return model, processor
-        raise
+        except RuntimeError as e:
+            if "out of memory" in str(e).lower():
+                print(f"⚠ {desc} too large for GPU, trying CPU...")
+                try:
+                    model = Qwen2VLForConditionalGeneration.from_pretrained(
+                        model_name,
+                        torch_dtype=torch.float32,
+                        device_map="cpu",
+                        trust_remote_code=True,
+                    )
+                    processor = AutoProcessor.from_pretrained(model_name, trust_remote_code=True)
+                    print(f"✓ VLM loaded on CPU: {desc}")
+                    return model, processor
+                except Exception:
+                    last_error = e
+                    continue
+            else:
+                last_error = e
+                continue
+        except Exception as e:
+            last_error = e
+            continue
+
+    if last_error:
+        raise RuntimeError(f"VLM loading failed: {last_error}")
+    raise FileNotFoundError("Could not load VLM model")
 
 
 def get_relevant_crop(pil_image, question, options, ocr_texts, map_h, map_w):
@@ -687,14 +697,8 @@ def run_vlm_inference(model, processor, image, prompt_text):
         generated_ids = model.generate(**inputs, max_new_tokens=16, do_sample=False)
 
     trimmed = [out[len(inp):] for inp, out in zip(inputs.input_ids, generated_ids)]
-    output = processor.batch_decode(trimmed, skip_special_tokens=True,
-                                    clean_up_tokenization_spaces=False)[0].strip()
-
-    # Clear cache to reduce memory usage
-    if torch.cuda.is_available():
-        torch.cuda.empty_cache()
-
-    return output
+    return processor.batch_decode(trimmed, skip_special_tokens=True,
+                                  clean_up_tokenization_spaces=False)[0].strip()
 
 
 def parse_vlm_answer(output_text):
@@ -731,11 +735,8 @@ def answer_with_vlm(model, processor, pil_image, question, options, ocr_context=
     full_answer = parse_vlm_answer(full_raw)
 
     # Also run on a cropped region for potentially better accuracy on small text
-    # Skip crop on CPU or low-memory systems to speed up inference
     crop_answer = None
-    use_crop = torch.cuda.is_available() and map_h > 0 and ocr_texts is not None
-
-    if use_crop:
+    if ocr_texts and map_h > 0:
         crop = get_relevant_crop(pil_image, question, options, ocr_texts, map_h, map_w)
         if crop is not None:
             crop_prompt = (
@@ -744,12 +745,8 @@ def answer_with_vlm(model, processor, pil_image, question, options, ocr_context=
                 f"Options:\n{opt_str}\n\n"
                 f"Answer with ONLY a single digit: 1, 2, 3, or 4. If unsure, respond with 5."
             )
-            try:
-                crop_raw = run_vlm_inference(model, processor, crop, crop_prompt)
-                crop_answer = parse_vlm_answer(crop_raw)
-            except RuntimeError:
-                # If crop fails due to memory, skip it
-                crop_answer = None
+            crop_raw = run_vlm_inference(model, processor, crop, crop_prompt)
+            crop_answer = parse_vlm_answer(crop_raw)
 
     # If both agree, high confidence. If they disagree, prefer full image (more context).
     if crop_answer is not None and crop_answer != 5:

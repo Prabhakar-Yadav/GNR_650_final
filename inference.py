@@ -614,109 +614,12 @@ def get_gpu_memory_gb():
     return 0
 
 
-def load_vlm_legacy():
-    from transformers import AutoProcessor, Qwen2VLForConditionalGeneration, BitsAndBytesConfig
-
-    gpu_mem = get_gpu_memory_gb()
-    print(f"GPU memory: {gpu_mem:.1f} GB")
-
-    # Build loading strategies based on available GPU memory
-    strategies = []
-
-    # Strategy 1: Local 72B AWQ (needs 38GB+)
-    if gpu_mem >= 38:
-        strategies.append({
-            "name": "./model_weights/Qwen2-VL-72B-Instruct-AWQ",
-            "desc": "72B-AWQ (local)",
-            "kwargs": {"torch_dtype": torch.bfloat16, "device_map": "auto"},
-        })
-
-    # Strategy 2: Local 7B full precision (needs 16GB+)
-    if gpu_mem >= 16:
-        strategies.append({
-            "name": "./model_weights/Qwen2-VL-7B-Instruct",
-            "desc": "7B full (local)",
-            "kwargs": {"torch_dtype": torch.bfloat16, "device_map": "auto"},
-        })
-
-    # Strategy 3: 7B with 4-bit quantization (needs 4GB+)
-    if gpu_mem >= 4:
-        bnb_config = BitsAndBytesConfig(
-            load_in_4bit=True,
-            bnb_4bit_compute_dtype=torch.bfloat16,
-            bnb_4bit_use_double_quant=True,
-            bnb_4bit_quant_type="nf4",
-        )
-        strategies.append({
-            "name": "./model_weights/Qwen2-VL-7B-Instruct",
-            "desc": "7B 4-bit (local)",
-            "kwargs": {"quantization_config": bnb_config, "device_map": "auto"},
-        })
-        strategies.append({
-            "name": "Qwen/Qwen2-VL-7B-Instruct",
-            "desc": "7B 4-bit (HuggingFace)",
-            "kwargs": {"quantization_config": bnb_config, "device_map": "auto"},
-        })
-
-    # Strategy 4: 2B model as last GPU resort
-    if gpu_mem >= 2:
-        strategies.append({
-            "name": "Qwen/Qwen2-VL-2B-Instruct",
-            "desc": "2B (HuggingFace)",
-            "kwargs": {"torch_dtype": torch.bfloat16, "device_map": "auto"},
-        })
-
-    # Strategy 5: CPU fallback (always available)
-    strategies.append({
-        "name": "Qwen/Qwen2-VL-2B-Instruct",
-        "desc": "2B CPU (HuggingFace)",
-        "kwargs": {"torch_dtype": torch.float32, "device_map": "cpu"},
-    })
-
-    last_error = None
-    for strat in strategies:
-        try:
-            print(f"Trying: {strat['desc']}...")
-            model = Qwen2VLForConditionalGeneration.from_pretrained(
-                strat["name"],
-                low_cpu_mem_usage=True,
-                trust_remote_code=True,
-                **strat["kwargs"],
-            )
-            processor = AutoProcessor.from_pretrained(strat["name"], trust_remote_code=True)
-            print(f"✓ VLM loaded: {strat['desc']}")
-            return model, processor
-        except Exception as e:
-            print(f"✗ {strat['desc']} failed: {str(e)[:100]}")
-            last_error = e
-            if torch.cuda.is_available():
-                torch.cuda.empty_cache()
-            continue
-
-    raise RuntimeError(f"All VLM strategies failed. Last: {last_error}")
-
-
-STABLE_MODEL_ID = "Qwen/Qwen2.5-VL-7B-Instruct"
-
+# Primary model: Qwen2.5-VL-7B-Instruct (no AWQ, loads clean on any GPU >=16GB)
+# Fallback: Qwen2-VL-7B-Instruct
 MODEL_CANDIDATES = [
-    ("Qwen2.5-VL-7B", "Qwen2.5-VL-7B-Instruct", "Qwen/Qwen2.5-VL-7B-Instruct", False),
-    ("Qwen2-VL-7B", "Qwen2-VL-7B-Instruct", "Qwen/Qwen2-VL-7B-Instruct", False),
-    ("Qwen2.5-VL-32B-AWQ", "Qwen2.5-VL-32B-Instruct-AWQ", "Qwen/Qwen2.5-VL-32B-Instruct-AWQ", True),
-    ("Qwen2.5-VL-72B-AWQ", "Qwen2.5-VL-72B-Instruct-AWQ", "Qwen/Qwen2.5-VL-72B-Instruct-AWQ", True),
-    ("Qwen2-VL-72B-AWQ", "Qwen2-VL-72B-Instruct-AWQ", "Qwen/Qwen2-VL-72B-Instruct-AWQ", True),
+    ("Qwen2.5-VL-7B", "Qwen2.5-VL-7B-Instruct", "Qwen/Qwen2.5-VL-7B-Instruct"),
+    ("Qwen2-VL-7B",   "Qwen2-VL-7B-Instruct",   "Qwen/Qwen2-VL-7B-Instruct"),
 ]
-
-
-def normalize_model_request():
-    requested = os.environ.get("VLM_MODEL_ID", STABLE_MODEL_ID).strip() or STABLE_MODEL_ID
-    allow_awq = os.environ.get("ALLOW_UNSTABLE_AWQ", "0") == "1"
-    if "AWQ" in requested.upper() and not allow_awq:
-        print(
-            f"Requested {requested}, but AWQ is disabled because this AutoAWQ/Triton "
-            f"stack can crash during generation. Using stable {STABLE_MODEL_ID}."
-        )
-        return STABLE_MODEL_ID, allow_awq
-    return requested, allow_awq
 
 
 def unique_paths(paths):
@@ -745,118 +648,40 @@ def resolve_vl_model_class(model_name):
 
 
 def load_vlm():
-    """Load the best local VLM available without using internet at inference time."""
+    """Load Qwen2.5-VL-7B-Instruct from local weights (downloaded by setup.bash)."""
     from transformers import AutoProcessor
-
-    # Disable Triton AWQ kernel (JIT compile errors on some CUDA versions).
-    os.environ["AWQ_DISABLE_TRITON"] = "1"
-    # Patch GEMM forward to cast bfloat16 -> float16 around the kernel call.
-    # A100 with torch_dtype="auto" loads in bfloat16, but awq_ext only accepts float16.
-    try:
-        from awq.modules.linear.gemm import WQLinear_GEMM
-        _orig_awq_fwd = WQLinear_GEMM.forward
-
-        def _awq_bf16_compat(self, x):
-            cast = x.dtype == torch.bfloat16
-            if cast:
-                x = x.to(torch.float16)
-                if hasattr(self, "scales") and self.scales.dtype == torch.bfloat16:
-                    self.scales = self.scales.to(torch.float16)
-                if hasattr(self, "bias") and self.bias is not None and self.bias.dtype == torch.bfloat16:
-                    self.bias = self.bias.to(torch.float16)
-            out = _orig_awq_fwd(self, x)
-            return out.to(torch.bfloat16) if cast else out
-
-        WQLinear_GEMM.forward = _awq_bf16_compat
-        print("AWQ bfloat16 patch applied")
-    except Exception as _e:
-        print(f"AWQ patch skipped ({_e}), falling back to float16 load")
 
     gpu_mem = get_gpu_memory_gb()
     print(f"GPU memory: {gpu_mem:.1f} GB")
 
-    requested_model, allow_awq = normalize_model_request()
-    requested_dir = requested_model.rstrip("/").split("/")[-1]
-    allow_download = os.environ.get("ALLOW_MODEL_DOWNLOAD", "0") == "1"
     roots = model_weight_roots()
     print(f"Model weight roots: {[str(r) for r in roots]}")
 
-    ordered_candidates = []
-    for item in MODEL_CANDIDATES:
-        desc, local_dir, repo_id, is_awq = item
-        if requested_model == repo_id or requested_dir == local_dir:
-            ordered_candidates.insert(0, item)
-        else:
-            ordered_candidates.append(item)
-
     strategies = []
-    for desc, local_dir, repo_id, is_awq in ordered_candidates:
-        if is_awq and not allow_awq:
-            continue
-        local_path = None
+    for desc, local_dir, repo_id in MODEL_CANDIDATES:
         for root in roots:
             candidate = root / local_dir
             if (candidate / "config.json").exists():
-                local_path = candidate
+                print(f"  Found: {candidate}")
+                strategies.append({"name": str(candidate), "desc": f"{desc} (local)", "local_only": True})
                 break
-        if local_path is not None:
-            print(f"  Found: {local_path}")
-            strategies.append({
-                "name": str(local_path),
-                "desc": f"{desc} (local)",
-                "local_only": True,
-                "is_awq": is_awq,
-            })
-        elif allow_download and (requested_model == repo_id or requested_dir == local_dir):
-            strategies.append({
-                "name": repo_id,
-                "desc": f"{desc} (download allowed)",
-                "local_only": False,
-                "is_awq": is_awq,
-            })
 
     if not strategies:
         raise FileNotFoundError(
-            "No local VLM weights found. Run setup.bash first, or set "
-            "ALLOW_MODEL_DOWNLOAD=1 only during a network-enabled setup test."
+            "No local VLM weights found. Run setup.bash first to download the model."
         )
 
     min_pixels = int(os.environ.get("QWEN_MIN_PIXELS", 256 * 28 * 28))
-    max_pixels = int(os.environ.get("QWEN_MAX_PIXELS", 4096 * 28 * 28))
-
-    # Patch AWQ GEMM forward: cast activations bf16->fp16 around the kernel
-    # call. torch_dtype="auto" on A100 gives bf16 activations but the
-    # awq_ext CUDA kernel only accepts fp16. qweight/qzeros must stay int32
-    # (torch_dtype="auto" respects existing int dtypes; torch_dtype=float16
-    # corrupts them in autoawq 0.2.9).
-    try:
-        from awq.modules.linear.gemm import WQLinear_GEMM
-        _orig_gemm_fwd = WQLinear_GEMM.forward.__func__ if hasattr(WQLinear_GEMM.forward, '__func__') else WQLinear_GEMM.forward
-
-        def _fp16_compat_fwd(self, x):
-            needs_cast = x.is_floating_point() and x.dtype != torch.float16
-            if needs_cast:
-                x = x.to(torch.float16)
-                if hasattr(self, "scales") and self.scales.is_floating_point():
-                    self.scales = self.scales.to(torch.float16)
-                if hasattr(self, "bias") and self.bias is not None and self.bias.is_floating_point():
-                    self.bias = self.bias.to(torch.float16)
-            out = _orig_gemm_fwd(self, x)
-            return out.to(torch.bfloat16) if needs_cast else out
-
-        WQLinear_GEMM.forward = _fp16_compat_fwd
-        print("AWQ fp16 activation patch applied")
-    except Exception as _ep:
-        print(f"AWQ activation patch skipped: {_ep}")
+    max_pixels = int(os.environ.get("QWEN_MAX_PIXELS", 1280 * 28 * 28))
 
     last_error = None
     for strat in strategies:
         try:
-            print(f"Trying: {strat['desc']}...")
+            print(f"Loading: {strat['desc']}...")
             model_cls = resolve_vl_model_class(strat["name"])
             model = model_cls.from_pretrained(
                 strat["name"],
-                torch_dtype="auto",
+                torch_dtype=torch.bfloat16,
                 device_map="auto",
                 low_cpu_mem_usage=True,
                 trust_remote_code=True,
@@ -872,7 +697,7 @@ def load_vlm():
             print(f"VLM loaded: {strat['desc']}")
             return model, processor
         except Exception as e:
-            print(f"{strat['desc']} failed: {str(e)[:100]}")
+            print(f"{strat['desc']} failed: {str(e)[:120]}")
             last_error = e
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()

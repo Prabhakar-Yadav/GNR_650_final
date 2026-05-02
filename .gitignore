@@ -1,0 +1,35 @@
+# Generated outputs
+stitched_map.png
+submission.csv
+__pycache__/
+*.pyc
+
+# Test/debug images and data
+map_*.png
+patches/
+test_dir/
+gnr_final_project_repo/
+GNR_650_final/
+
+# Scratch files
+predictions_*.csv
+test_50_*.csv
+*.txt
+MODAL_*.md
+BOT_*.md
+GRADING_*.md
+SUBMISSION_*.md
+FINAL_*.md
+IMPROVEMENTS.md
+TEST_RESULTS.md
+README_VERIFICATION.md
+RUN_MODAL_COMMANDS.md
+CONTRIBUTOR_VERIFICATION.txt
+SUBMISSION_STATUS.txt
+PROVIDED_PS_README.md
+
+# Model weights (too large for git)
+model_weights/
+
+# Local
+.claude/

@@ -40,26 +40,26 @@ This evaluation encourages both accuracy and strategic decision-making—partici
 A ```submission.csv``` must be submitted with the following format.
 
     id,question_num,option
-    ques_1,ques_1,0
-    ques_2,ques_2,0
-    ques_3,ques_3,0
+    ques_1,ques_1,1
+    ques_2,ques_2,5
+    ques_3,ques_3,2
     etc.
 
-The first columns ```id``` is same as ```question_num```.
-For each question in the test set, you must predict the correct answer (or 5 for unanswered one). Any other value will be treated as hallucinated value.
+The first column ```id``` is same as ```question_num```.
+For each question in the test set, you must predict the correct answer option (1, 2, 3, or 4) or 5 for unanswered questions. Any other value will be treated as hallucinated and incur -1 penalty.
 
 ## Dataset Description
 The competition data is designed to simulate a real-world evaluation setup where the final test set remains hidden.
 
 ### Files Provided
 * **test.csv** - The test set containing the questions that needs to be answered based on map
-    - Column:
-            ```question_id```: Unique identifier for each question
-            ```question```: Question that has to be answered
-            ```option_1```: Answer choice 1 corresponding to the question
-            ```option_2```: Answer choice 2 corresponding to the question
-            ```option_3```: Answer choice 3 corresponding to the question
-            ```option_4```: Answer choice 4 corresponding to the question
+    - Columns:
+        - `id`: Unique identifier for each question (e.g., ques_1)
+        - `question`: Question text that has to be answered
+        - `option_1`: Answer choice 1 (option value for submission)
+        - `option_2`: Answer choice 2 (option value for submission)
+        - `option_3`: Answer choice 3 (option value for submission)
+        - `option_4`: Answer choice 4 (option value for submission)
 * **patches/** - folder containing PNG patches of map.
     - ⚠️ Note: For anchoring map, **patch_0.png** will always correspond to the top-left corner of the original map
     - Except **patch_0.png**, all patches can be shuffled or rotated
@@ -97,8 +97,8 @@ Participants must submit a file named submission.csv:
 
 ## Competition Rules:
 
-- **Deadline to upload is 2nd May 23:59 UTC (3rd May 05:30AM IST)**
-- **No Late Days are allowed for project submission**
+- **No late submissions accepted**
+- **Submission deadline as per course calendar**
 - Notebook/Python file only competition (You'll upload link to the folder containing the jupyter notebook or python file on moodle and any model weights that is required)
 - **Proper README to setup the environment without which you will be directly graded 0 (No communication from the TA will be done regarding this)**
 - An environment.yml or requirements.txt file that can be used to create environment
@@ -139,14 +139,17 @@ This produces `submission.csv` in the current directory.
 - Clones this repository
 - Creates conda environment `gnr_project_env` with Python 3.11
 - Installs all dependencies (see `requirements.txt`)
-- Downloads `Qwen/Qwen2-VL-7B-Instruct` model weights locally (no internet needed at inference time)
+- Downloads `Qwen2-VL-72B-Instruct-AWQ` model weights locally (no internet needed at inference time)
 
 ### Dependencies
 See `requirements.txt`. Key packages:
-- `torch==2.4.1` (CUDA 12.4 wheels, compatible with CUDA 12.6)
-- `transformers==4.46.3`
-- `qwen-vl-utils`
-- `opencv-python-headless`, `pillow`, `pandas`, `numpy`
+- **PyTorch**: `torch==2.4.1`, `torchvision==0.19.1`, `torchaudio==2.4.1` (CUDA 12.4 wheels, compatible with CUDA 12.6)
+- **Model Loading**: `transformers==4.46.3`, `accelerate==1.1.1`, `huggingface_hub`
+- **VLM**: `qwen-vl-utils`
+- **Image Processing**: `opencv-python-headless`, `pillow`
+- **Text Extraction**: `easyocr`
+- **Optimization**: `bitsandbytes` (for 4-bit quantization fallback)
+- **Data**: `pandas`, `numpy`
 
 ## Sources / Citations
 - [Qwen2-VL](https://github.com/QwenLM/Qwen2-VL) — Vision-Language Model for map understanding

@@ -9,3 +9,6 @@ pillow
 opencv-python-headless
 pandas
 numpy
+easyocr
+bitsandbytes
+autoawq

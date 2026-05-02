@@ -54,14 +54,13 @@ def edge_mse(a, b, side):
     return np.mean((ea - eb) ** 2)
 
 
-def stitch_patches(patches, grid_size):
+def stitch_patches(patches, n_rows, n_cols):
     """
-    Greedily stitch patches into a grid_size x grid_size grid.
+    Greedily stitch patches into an n_rows x n_cols grid.
     patch_0 is always top-left (no rotation).
     Returns the stitched image.
     """
-    n = grid_size
-    grid = [[None] * n for _ in range(n)]  # grid[row][col] = (patch_array)
+    grid = [[None] * n_cols for _ in range(n_rows)]
     used = set()
 
     # Place patch_0 at top-left without rotation
@@ -69,8 +68,8 @@ def stitch_patches(patches, grid_size):
     used.add(0)
 
     # Fill positions row by row
-    for row in range(n):
-        for col in range(n):
+    for row in range(n_rows):
+        for col in range(n_cols):
             if row == 0 and col == 0:
                 continue
 
@@ -106,8 +105,8 @@ def stitch_patches(patches, grid_size):
 
     # Assemble full image
     rows_imgs = []
-    for row in range(n):
-        row_imgs = [grid[row][col] for col in range(n)]
+    for row in range(n_rows):
+        row_imgs = [grid[row][col] for col in range(n_cols)]
         rows_imgs.append(np.concatenate(row_imgs, axis=1))
     full_map = np.concatenate(rows_imgs, axis=0)
     return full_map
@@ -218,12 +217,24 @@ def main():
     print("Loading patches...")
     patches = load_patches(str(patches_dir))
     n_patches = len(patches)
+
+    # Determine grid dimensions — prefer square, fall back to best rectangle
     grid_size = int(math.isqrt(n_patches))
-    assert grid_size * grid_size == n_patches, f"Expected square grid but got {n_patches} patches"
-    print(f"  {n_patches} patches -> {grid_size}x{grid_size} grid")
+    if grid_size * grid_size == n_patches:
+        n_rows, n_cols = grid_size, grid_size
+    else:
+        # Find the factor pair closest to square
+        best = (1, n_patches)
+        for r in range(1, int(n_patches**0.5) + 1):
+            if n_patches % r == 0:
+                c = n_patches // r
+                if abs(r - c) < abs(best[0] - best[1]):
+                    best = (r, c)
+        n_rows, n_cols = best
+    print(f"  {n_patches} patches -> {n_rows}x{n_cols} grid")
 
     print("Stitching map...")
-    full_map = stitch_patches(patches, grid_size)
+    full_map = stitch_patches(patches, n_rows, n_cols)
     map_path = "stitched_map.png"
     cv2.imwrite(map_path, full_map)
     print(f"  Saved stitched map: {map_path} ({full_map.shape})")

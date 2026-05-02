@@ -110,3 +110,45 @@ Participants must submit a file named submission.csv:
 - Okay to consult and discuss idea but final solution should be your own.
 - Final grading will be based on final leaderboard standing
 - Cite whatever source you'll be using in your notebook
+
+## Environment Setup
+
+### Requirements
+- Linux, CUDA 12.6, Python 3.11
+- Conda must be installed
+
+### Steps
+
+**1. Run setup (clones repo, creates env, downloads weights):**
+```bash
+bash setup.bash
+```
+
+**2. Activate environment:**
+```bash
+conda activate gnr_project_env
+```
+
+**3. Run inference:**
+```bash
+python inference.py --test_dir <absolute_path_to_test_dir>
+```
+This produces `submission.csv` in the current directory.
+
+### What setup.bash does
+- Clones this repository
+- Creates conda environment `gnr_project_env` with Python 3.11
+- Installs all dependencies (see `requirements.txt`)
+- Downloads `Qwen/Qwen2-VL-7B-Instruct` model weights locally (no internet needed at inference time)
+
+### Dependencies
+See `requirements.txt`. Key packages:
+- `torch==2.4.1` (CUDA 12.4 wheels, compatible with CUDA 12.6)
+- `transformers==4.46.3`
+- `qwen-vl-utils`
+- `opencv-python-headless`, `pillow`, `pandas`, `numpy`
+
+## Sources / Citations
+- [Qwen2-VL](https://github.com/QwenLM/Qwen2-VL) — Vision-Language Model for map understanding
+- [HuggingFace Transformers](https://github.com/huggingface/transformers)
+- OpenCV for image stitching

@@ -736,6 +736,17 @@ def load_vlm():
     """Load the best local VLM available without using internet at inference time."""
     from transformers import AutoProcessor
 
+    # Disable Triton-based AWQ kernel - use GEMM (cuBLAS) instead, which is
+    # compatible across all CUDA driver versions. Triton JIT can fail with
+    # IncompatibleTypeErrorImpl on certain driver/triton version combos.
+    os.environ["AWQ_DISABLE_TRITON"] = "1"
+    try:
+        import awq.modules.linear as _awq_linear
+        if hasattr(_awq_linear, "WQLinear_Triton"):
+            _awq_linear.WQLinear_Triton = _awq_linear.WQLinear_GEMM
+    except Exception:
+        pass
+
     gpu_mem = get_gpu_memory_gb()
     print(f"GPU memory: {gpu_mem:.1f} GB")
 

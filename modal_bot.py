@@ -17,10 +17,7 @@ test_volume = modal.Volume.from_name(TEST_VOLUME_NAME, create_if_missing=True)
 image = (
     modal.Image.debian_slim(python_version="3.11")
     .apt_install("bash", "libglib2.0-0")
-    .add_local_file("setup.bash", f"{PROJECT_DIR}/setup.bash")
-    .add_local_file("requirements.txt", f"{PROJECT_DIR}/requirements.txt")
-    .add_local_file("inference.py", f"{PROJECT_DIR}/inference.py")
-    .add_local_file("sample_submission.csv", f"{PROJECT_DIR}/sample_submission.csv")
+    .add_local_file("setup.bash", f"{PROJECT_DIR}/setup.bash", copy=True)
     .workdir(PROJECT_DIR)
     .env(
         {
@@ -38,6 +35,9 @@ image = (
             "QWEN_MAX_PIXELS": QWEN_MAX_PIXELS,
         }
     )
+    .add_local_file("requirements.txt", f"{PROJECT_DIR}/requirements.txt")
+    .add_local_file("inference.py", f"{PROJECT_DIR}/inference.py")
+    .add_local_file("sample_submission.csv", f"{PROJECT_DIR}/sample_submission.csv")
 )
 
 

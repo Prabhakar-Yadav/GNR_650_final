@@ -290,13 +290,11 @@ def find_text_on_map(ocr_texts, query, threshold=0.5):
     matches = []
     for t in ocr_texts:
         text_lower = t["text"].lower().strip()
-        # Skip very short OCR results (noise)
         if len(text_lower) < 2:
             continue
-        # Exact full match
+
         if query_lower == text_lower:
             score = 1.0
-        # Substantial substring match (both must be reasonably long)
         elif len(query_lower) >= 3 and len(text_lower) >= 3:
             if query_lower in text_lower:
                 score = len(query_lower) / len(text_lower)
@@ -308,12 +306,13 @@ def find_text_on_map(ocr_texts, query, threshold=0.5):
                 score = fuzzy_ratio(query_lower, text_lower)
         else:
             score = fuzzy_ratio(query_lower, text_lower)
-        # Word overlap bonus (any single word match is good)
-        text_words = set(w for w in text_lower.split() if len(w) > 1)
+
+        text_words = set(w for w in text_lower.split() if len(w) > 2)
         if query_words and text_words:
             word_overlap = len(query_words & text_words) / len(query_words)
             if word_overlap > 0.2:
-                score = max(score, 0.4 + word_overlap * 0.6)
+                score = max(score, 0.4 + word_overlap * 0.55)
+
         if score >= threshold:
             matches.append((t, score))
     matches.sort(key=lambda x: -x[1])
@@ -347,6 +346,18 @@ def answer_with_ocr(question, options, ocr_texts, map_h, map_w):
     """
     q_lower = question.lower()
 
+    # Skip questions that require visual attributes OCR can't handle
+    skip_patterns = [
+        'nature of the terrain',
+        'terrain', 'dense', 'densely',
+        'color', 'colored', 'pink', 'red',
+        'building', 'company',
+        'infrastructure',
+        'appears',
+    ]
+    if any(pat in q_lower for pat in skip_patterns):
+        return None, 0
+
     # Get OCR matches for all options
     option_data = []
     for i, opt in enumerate(options):
@@ -368,7 +379,7 @@ def answer_with_ocr(question, options, ocr_texts, map_h, map_w):
     # ── Strategy 2: Direct text match with spatial awareness ─────────────────
     option_data_sorted = sorted(option_data, key=lambda x: -x[1])
 
-    if option_data_sorted[0][1] >= 0.55:
+    if option_data_sorted[0][1] >= 0.50:
         top_idx, top_score, top_match, top_opt = option_data_sorted[0]
         second_score = option_data_sorted[1][1] if len(option_data_sorted) > 1 else 0
         gap = top_score - second_score
@@ -379,38 +390,31 @@ def answer_with_ocr(question, options, ocr_texts, map_h, map_w):
             spatial_ok = check_spatial_match(spatial_keywords, zones)
             if not spatial_ok:
                 for idx, score, match, opt in option_data_sorted[1:]:
-                    if score >= 0.5 and match:
+                    if score >= 0.45 and match:
                         zones2 = get_spatial_zone(match["norm_x"], match["norm_y"])
                         if check_spatial_match(spatial_keywords, zones2):
-                            return idx, 0.7
+                            return idx, 0.68
                 return None, 0
 
-        # Spatial confirmation bonus: if question specifies region AND the top
-        # match is confirmed to be in that region, we can be slightly more trusting
         spatial_bonus = 0
         if spatial_keywords and top_match:
             zones = get_spatial_zone(top_match["norm_x"], top_match["norm_y"])
             if check_spatial_match(spatial_keywords, zones):
-                spatial_bonus = 0.05
+                spatial_bonus = 0.06
 
         if top_score >= 0.95 and gap >= max(0.05, 0.1 - spatial_bonus):
             return top_idx, 0.9
-        elif top_score >= 0.85 and gap >= max(0.15, 0.2 - spatial_bonus):
+        elif top_score >= 0.85 and gap >= max(0.12, 0.18 - spatial_bonus):
             return top_idx, 0.8
-        elif top_score >= 0.8 and gap >= max(0.25, 0.3 - spatial_bonus):
-            return top_idx, 0.7
-        elif top_score >= 0.75 and gap >= 0.2:
-            # Lower threshold for borderline cases when spatial confirms
+        elif top_score >= 0.75 and gap >= max(0.15, 0.22 - spatial_bonus):
+            return top_idx, 0.73
+        elif top_score >= 0.70 and gap >= 0.18:
             if spatial_keywords and top_match:
                 zones = get_spatial_zone(top_match["norm_x"], top_match["norm_y"])
                 if check_spatial_match(spatial_keywords, zones):
-                    return top_idx, 0.65
-        elif top_score >= 0.7 and gap >= 0.25 and spatial_keywords:
-            # Very conservative: only if spatial explicitly confirms
-            if top_match:
-                zones = get_spatial_zone(top_match["norm_x"], top_match["norm_y"])
-                if check_spatial_match(spatial_keywords, zones):
-                    return top_idx, 0.55
+                    return top_idx, 0.68
+        elif top_score >= 0.65 and gap >= 0.22:
+            return top_idx, 0.65
 
         return None, 0
 

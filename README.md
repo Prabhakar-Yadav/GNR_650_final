@@ -54,7 +54,7 @@ The competition data is designed to simulate a real-world evaluation setup where
 ### Files Provided
 * **test.csv** - The test set containing the questions that needs to be answered based on map
     - Columns:
-        - `id`: Unique identifier for each question (e.g., ques_1)
+        - `id` or `question_id`: Unique identifier for each question (e.g., ques_1)
         - `question`: Question text that has to be answered
         - `option_1`: Answer choice 1 (option value for submission)
         - `option_2`: Answer choice 2 (option value for submission)
@@ -124,22 +124,21 @@ Participants must submit a file named submission.csv:
 bash setup.bash
 ```
 
-**2. Activate environment:**
+**2. Run inference (conda run automatically activates the environment):**
 ```bash
-conda activate gnr_project_env
-```
-
-**3. Run inference:**
-```bash
-python inference.py --test_dir <path_to_test_dir>
+conda run -n gnr_project_env python inference.py --test_dir <path_to_test_dir>
 ```
 Where `<path_to_test_dir>` is the directory containing `patches/` and `test.csv`.
 
+**OR manually:**
+```bash
+conda activate gnr_project_env
+python inference.py --test_dir <path_to_test_dir>
+```
+
 For grading: the test directory will be provided by the evaluator, e.g.:
 ```bash
-python inference.py --test_dir /grading/test_data
-# or
-python inference.py --test_dir ../test_data
+conda run -n gnr_project_env python inference.py --test_dir /grading/test_data
 ```
 
 This produces `submission.csv` in the current directory.

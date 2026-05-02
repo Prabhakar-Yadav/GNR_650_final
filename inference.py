@@ -869,6 +869,14 @@ def parse_vlm_answer(output_text):
     return 5
 
 
+def get_question_id(row):
+    for col in ("id", "question_id", "question_num"):
+        value = row.get(col)
+        if value is not None and not pd.isna(value):
+            return str(value)
+    raise KeyError("test.csv must contain one of: id, question_id, question_num")
+
+
 def answer_with_vlm(model, processor, pil_image, question, options, ocr_context="",
                      ocr_texts=None, map_h=0, map_w=0):
     opt_str = "\n".join(f"{i+1}. {opt}" for i, opt in enumerate(options))
@@ -1022,7 +1030,7 @@ def main():
     results = []
 
     for _, row in df.iterrows():
-        qid = row["id"]
+        qid = get_question_id(row)
         question = row["question"]
         options = [row["option_1"], row["option_2"], row["option_3"], row["option_4"]]
 

@@ -4,8 +4,8 @@ set -euo pipefail
 REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$REPO_DIR"
 
-MODEL_ID="Qwen/Qwen2.5-VL-72B-Instruct-AWQ"
-MODEL_DIR="./model_weights/Qwen2.5-VL-72B-Instruct-AWQ"
+MODEL_ID="${VLM_MODEL_ID:-Qwen/Qwen2.5-VL-72B-Instruct-AWQ}"
+MODEL_DIR="${VLM_MODEL_DIR:-./model_weights/${MODEL_ID##*/}}"
 PYTHON_BIN="${PYTHON_BIN:-python}"
 
 if ! command -v "$PYTHON_BIN" >/dev/null 2>&1; then
@@ -56,15 +56,17 @@ PYEOF
 "$PYTHON_BIN" -m pip install --upgrade --no-deps transformers==4.51.3
 
 echo "Downloading VLM weights: ${MODEL_ID}"
+export MODEL_ID MODEL_DIR
 "$PYTHON_BIN" - <<'PYEOF'
+import os
 from huggingface_hub import snapshot_download
 
 snapshot_download(
-    repo_id="Qwen/Qwen2.5-VL-72B-Instruct-AWQ",
-    local_dir="./model_weights/Qwen2.5-VL-72B-Instruct-AWQ",
+    repo_id=os.environ["MODEL_ID"],
+    local_dir=os.environ["MODEL_DIR"],
     ignore_patterns=["*.msgpack", "*.h5", "flax_model*", "*.ot"],
 )
-print("Qwen2.5-VL-72B-AWQ weights are ready.")
+print(f"{os.environ['MODEL_ID']} weights are ready.")
 PYEOF
 
 echo "Downloading EasyOCR English detection/recognition assets"

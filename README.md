@@ -137,6 +137,12 @@ PYTHON_BIN=python3.11 bash setup.bash
 python3.11 inference.py --test_dir <path_to_test_dir>
 ```
 
+Optional smaller VLM for 32-40GB GPU tests:
+```bash
+VLM_MODEL_ID=Qwen/Qwen2.5-VL-32B-Instruct-AWQ bash setup.bash
+QWEN_MAX_PIXELS=1003520 python inference.py --test_dir <path_to_test_dir>
+```
+
 For grading: the test directory will be provided by the evaluator, e.g.:
 ```bash
 python inference.py --test_dir /grading/test_data

@@ -1,172 +1,180 @@
 """
-Modal test script - simulates grading bot WITHOUT internet during inference.
+Modal test script — simulates grading bot WITHOUT internet during inference.
 
 Usage:
-  modal run modal_test_bot.py
+  python -m modal run modal_test_bot.py
 
-This:
-1. Creates a Modal image with all dependencies (WITH internet)
-2. Downloads model weights and EasyOCR assets during setup (WITH internet)
-3. Runs inference WITHOUT internet (simulates grading bot)
-4. Generates and grades submission.csv
+What happens:
+  1. Image build  (WITH internet): installs deps, downloads model + EasyOCR assets
+  2. Function run  (NO internet) : stitches map, runs OCR+VLM, writes submission.csv
 """
 
 import modal
-import os
 from pathlib import Path
 
 app = modal.App("gnr-grading-test")
 
-# Create image: install deps + download model/assets (WITH internet during build)
+# ── Fixed working directory inside the container ─────────────────────────────
+WORKDIR = "/app"
+MODEL_DIR = f"{WORKDIR}/model_weights/Qwen2.5-VL-72B-Instruct-AWQ"
+
+# ── Build the image layer-by-layer ───────────────────────────────────────────
 image = (
     modal.Image.debian_slim(python_version="3.11")
-    .pip_install_from_requirements("requirements.txt")
-    .run_commands(
-        # Install pip packages
-        "pip install --upgrade pip",
-        "pip install torch==2.6.0 torchvision==0.21.0 torchaudio==2.6.0 "
-        "--index-url https://download.pytorch.org/whl/cu124",
-        "pip install transformers==4.51.3 accelerate==1.6.0 huggingface_hub "
-        "qwen-vl-utils==0.0.8 pillow opencv-python-headless pandas numpy easyocr bitsandbytes autoawq==0.2.9",
+    # System libs needed by OpenCV / EasyOCR
+    .apt_install("libgl1", "libglib2.0-0")
+    # PyTorch with CUDA 12.4 wheels
+    .pip_install(
+        "torch==2.6.0", "torchvision==0.21.0", "torchaudio==2.6.0",
+        index_url="https://download.pytorch.org/whl/cu124",
     )
-    .run_commands(
-        # Download model weights (WITH internet during image build)
-        "python -c \"from huggingface_hub import snapshot_download; "
-        "snapshot_download(repo_id='Qwen/Qwen2.5-VL-72B-Instruct-AWQ', "
-        "local_dir='./model_weights/Qwen2.5-VL-72B-Instruct-AWQ', "
-        "ignore_patterns=['*.msgpack', '*.h5', 'flax_model*', '*.ot'])\"",
+    # Main inference stack
+    .pip_install(
+        "transformers==4.51.3",
+        "accelerate==1.6.0",
+        "huggingface_hub",
+        "qwen-vl-utils==0.0.8",
+        "pillow",
+        "opencv-python-headless",
+        "pandas",
+        "numpy",
+        "easyocr",
+        "bitsandbytes",
     )
+    # AutoAWQ (may downgrade transformers, so pin it back)
+    .pip_install("autoawq==0.2.9")
+    .pip_install("transformers==4.51.3")
+    # Download model weights into a known absolute path
     .run_commands(
-        # Download EasyOCR assets (WITH internet during image build)
-        "python -c \"import easyocr; easyocr.Reader(['en'], gpu=False, verbose=False)\"",
+        f"mkdir -p {MODEL_DIR} && python -c \""
+        f"from huggingface_hub import snapshot_download; "
+        f"snapshot_download("
+        f"  repo_id='Qwen/Qwen2.5-VL-72B-Instruct-AWQ',"
+        f"  local_dir='{MODEL_DIR}',"
+        f"  ignore_patterns=['*.msgpack','*.h5','flax_model*','*.ot'],"
+        f")\""
     )
+    # Pre-download EasyOCR English models
+    .run_commands(
+        "python -c \"import easyocr; easyocr.Reader(['en'], gpu=False, verbose=False)\""
+    )
+    # Copy your source code into the image
+    .add_local_file("inference.py", f"{WORKDIR}/inference.py")
 )
+
+# ── Mount: upload your local test data so the container can read it ──────────
+# Change this path to where your patches/ and test.csv live locally:
+LOCAL_TEST_DIR = r"c:\Users\PRABHAKAR\Documents\GNR_Final_project"
+REMOTE_TEST_DIR = "/test_data"
+
+test_mount = modal.Mount.from_local_dir(
+    LOCAL_TEST_DIR,
+    remote_path=REMOTE_TEST_DIR,
+    condition=lambda path: (
+        "patches" in path or path.endswith("test.csv")
+    ),
+)
+
 
 @app.function(
     image=image,
-    gpu="A100",  # Or L40s if available: gpu="L40s"
-    timeout=3600,  # 1 hour
+    gpu="A100",
+    timeout=3600,
+    mounts=[test_mount],
 )
-def run_inference_bot(test_dir_path: str):
-    """
-    Simulates grading bot:
-    - Setup already done (image build)
-    - Runs inference WITHOUT internet
-    - Returns submission.csv content
-    """
-    import subprocess
-    import json
-    
-    print("\n" + "="*80)
-    print("GRADING BOT TEST - OFFLINE INFERENCE")
-    print("="*80)
-    
-    # Verify model files exist (no internet to download)
-    model_dir = Path("./model_weights/Qwen2.5-VL-72B-Instruct-AWQ")
+def run_inference_bot():
+    import subprocess, os
+
+    os.chdir(WORKDIR)
+
+    print("\n" + "=" * 80)
+    print("GRADING BOT TEST — OFFLINE INFERENCE")
+    print("=" * 80)
+
+    # Verify model
+    model_dir = Path(MODEL_DIR)
     if model_dir.exists():
-        print(f"✓ Model weights found: {model_dir}")
-        model_files = list(model_dir.glob("*"))
-        print(f"  Files: {len(model_files)} items")
+        n = len(list(model_dir.iterdir()))
+        print(f"✓ Model weights found ({n} files): {model_dir}")
     else:
         print(f"✗ Model weights NOT found: {model_dir}")
         return {"status": "FAILED", "error": "Model not found"}
-    
-    # Verify EasyOCR cache exists
-    import os
-    easyocr_cache = Path(os.path.expanduser("~/.EasyOCR"))
-    if easyocr_cache.exists():
-        print(f"✓ EasyOCR cache found: {easyocr_cache}")
+
+    # Verify test data
+    test_dir = Path(REMOTE_TEST_DIR)
+    patches = test_dir / "patches"
+    test_csv = test_dir / "test.csv"
+    if patches.exists() and test_csv.exists():
+        n_patches = len(list(patches.glob("*.png")))
+        print(f"✓ Test data found: {n_patches} patches, test.csv present")
     else:
-        print(f"⚠ EasyOCR cache not found (will be created on first use)")
-    
-    print("\nRunning inference without internet...")
-    print(f"Test directory: {test_dir_path}")
+        print(f"✗ Test data NOT found at {test_dir}")
+        print(f"  patches/ exists: {patches.exists()}")
+        print(f"  test.csv exists: {test_csv.exists()}")
+        return {"status": "FAILED", "error": "Test data not found"}
+
+    # Verify EasyOCR cache
+    easyocr_cache = Path.home() / ".EasyOCR"
+    print(f"{'✓' if easyocr_cache.exists() else '⚠'} EasyOCR cache: {easyocr_cache}")
+
+    print(f"\nRunning: python inference.py --test_dir {REMOTE_TEST_DIR}")
     print("-" * 80)
-    
-    # Run inference (offline - no internet)
+
     result = subprocess.run(
-        ["python", "inference.py", "--test_dir", test_dir_path],
+        ["python", "inference.py", "--test_dir", REMOTE_TEST_DIR],
         capture_output=True,
         text=True,
-        timeout=900,  # 15 min timeout for inference
+        timeout=1800,
     )
-    
-    print("STDOUT:")
+
     print(result.stdout)
-    
     if result.stderr:
-        print("\nSTDERR:")
-        print(result.stderr)
-    
+        print("STDERR:", result.stderr[-1000:])
+
     print("-" * 80)
     print(f"Exit code: {result.returncode}")
-    
-    if result.returncode == 0:
-        # Check if submission.csv was created
-        if Path("submission.csv").exists():
-            with open("submission.csv", "r") as f:
-                content = f.read()
-            lines = content.strip().split("\n")
-            print(f"\n✓ submission.csv created: {len(lines)} rows")
-            print("\nFirst 5 rows:")
-            for line in lines[:5]:
-                print(f"  {line}")
-            
-            return {
-                "status": "SUCCESS",
-                "exit_code": result.returncode,
-                "rows": len(lines) - 1,  # Exclude header
-                "submission_preview": lines[:5],
-            }
-        else:
-            print("✗ submission.csv NOT created")
-            return {
-                "status": "FAILED",
-                "exit_code": result.returncode,
-                "error": "submission.csv not found",
-            }
-    else:
+
+    submission = Path("submission.csv")
+    if result.returncode == 0 and submission.exists():
+        content = submission.read_text()
+        lines = content.strip().splitlines()
+        print(f"\n✓ submission.csv: {len(lines) - 1} answers")
+        for line in lines[:6]:
+            print(f"  {line}")
         return {
-            "status": "FAILED",
-            "exit_code": result.returncode,
-            "stdout": result.stdout[-500:],  # Last 500 chars
-            "stderr": result.stderr[-500:],
+            "status": "SUCCESS",
+            "rows": len(lines) - 1,
+            "preview": lines[:6],
         }
+
+    return {
+        "status": "FAILED",
+        "exit_code": result.returncode,
+        "stdout_tail": result.stdout[-500:],
+        "stderr_tail": result.stderr[-500:],
+    }
+
 
 @app.local_entrypoint()
 def main():
-    """Test the bot on your local test data"""
     import json
-    
-    # Mount your local test directory
-    test_dir = "/path/to/local/test_data"  # Change this to your test path
-    
-    print("\n" + "="*80)
-    print("MODAL BOT TEST - WITHOUT INTERNET")
-    print("="*80)
-    print(f"\nTest data: {test_dir}")
-    print("\nPhase 1: Building image (downloads model, WITH internet)")
-    print("  - Installing PyTorch")
-    print("  - Downloading Qwen2.5-VL-72B-Instruct-AWQ (~36GB)")
-    print("  - Downloading EasyOCR assets")
-    print("\nPhase 2: Running inference (NO internet)")
-    print("  - All files pre-cached in image")
-    print("  - Simulates grading bot behavior")
+
+    print("\n" + "=" * 80)
+    print("MODAL BOT TEST")
+    print("=" * 80)
+    print(f"Local test data : {LOCAL_TEST_DIR}")
+    print(f"Remote mount    : {REMOTE_TEST_DIR}")
+    print(f"Model           : Qwen2.5-VL-72B-Instruct-AWQ")
     print("-" * 80)
 
-    result = run_inference_bot.remote(test_dir)
-    
-    print("\n" + "="*80)
-    print("TEST RESULT")
-    print("="*80)
-    print(json.dumps(result, indent=2))
-    
-    if result["status"] == "SUCCESS":
-        print("\n✓ BOT TEST PASSED - Inference runs offline as expected")
-        return 0
-    else:
-        print("\n✗ BOT TEST FAILED - See errors above")
-        return 1
+    result = run_inference_bot.remote()
 
-if __name__ == "__main__":
-    main()
+    print("\n" + "=" * 80)
+    print("RESULT")
+    print("=" * 80)
+    print(json.dumps(result, indent=2))
+
+    if result["status"] == "SUCCESS":
+        print("\n✓ BOT TEST PASSED")
+    else:
+        print("\n✗ BOT TEST FAILED")

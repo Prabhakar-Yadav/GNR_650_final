@@ -39,14 +39,20 @@ conda run -n gnr_project_env pip install \
     pandas \
     numpy
 
-# ─── 4. Download Qwen2-VL-7B-Instruct model weights (internet available here) ─
-# Weights are saved to ./model_weights/ so inference.py can find them offline.
+# ─── 4. Download model weights (internet available here) ──────────────────────
+# Qwen2-VL-72B-Instruct-AWQ: 4-bit quantized, ~36GB VRAM, fits in L40s 48GB
+# Much better at reading small map text than the 7B model.
+conda run -n gnr_project_env pip install autoawq
+
 conda run -n gnr_project_env python - <<'PYEOF'
 from huggingface_hub import snapshot_download
 import os
+
+# Primary: 72B AWQ (best accuracy for map text reading)
+print("Downloading Qwen2-VL-72B-Instruct-AWQ...")
 snapshot_download(
-    repo_id="Qwen/Qwen2-VL-7B-Instruct",
-    local_dir="./model_weights/Qwen2-VL-7B-Instruct",
+    repo_id="Qwen/Qwen2-VL-72B-Instruct-AWQ",
+    local_dir="./model_weights/Qwen2-VL-72B-Instruct-AWQ",
     ignore_patterns=["*.msgpack", "*.h5", "flax_model*", "*.ot"],
 )
 print("Model weights downloaded successfully.")

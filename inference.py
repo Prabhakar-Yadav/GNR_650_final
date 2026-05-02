@@ -225,14 +225,17 @@ def answer_questions_with_vlm(map_image_path, test_csv_path, model_name=None):
     from transformers import AutoProcessor, Qwen2VLForConditionalGeneration
     from qwen_vl_utils import process_vision_info
 
-    local_weights = Path("./model_weights/Qwen2-VL-7B-Instruct")
+    # Try 72B AWQ first (much better at text reading), fall back to 7B
+    local_72b = Path("./model_weights/Qwen2-VL-72B-Instruct-AWQ")
+    local_7b = Path("./model_weights/Qwen2-VL-7B-Instruct")
     if model_name is None:
-        if local_weights.exists():
-            model_name = str(local_weights)
+        if local_72b.exists():
+            model_name = str(local_72b)
+        elif local_7b.exists():
+            model_name = str(local_7b)
         else:
             raise FileNotFoundError(
-                f"Model weights not found at {local_weights}. "
-                "Run setup.bash first to download them."
+                "Model weights not found. Run setup.bash first to download them."
             )
 
     print(f"Loading model: {model_name}")
@@ -257,15 +260,19 @@ def answer_questions_with_vlm(map_image_path, test_csv_path, model_name=None):
         opt4 = row["option_4"]
 
         prompt = (
-            f"You are analyzing a satellite/map image. Answer the following multiple choice question.\n\n"
+            f"This is a detailed geographic map showing streets, water bodies, landmarks, and labeled locations. "
+            f"Read all the text labels carefully including small ones. "
+            f"Answer the following multiple choice question based ONLY on what you can see in the map.\n\n"
             f"Question: {question}\n\n"
             f"Options:\n"
             f"1. {opt1}\n"
             f"2. {opt2}\n"
             f"3. {opt3}\n"
             f"4. {opt4}\n\n"
-            f"Look carefully at the map image and respond with ONLY the number (1, 2, 3, or 4) of the correct answer. "
-            f"If you are not sure, respond with 5."
+            f"Instructions: Look at the map labels, road names, area names, water body names, "
+            f"and landmark names. Pick the option that matches what is actually labeled on the map. "
+            f"Respond with ONLY a single digit: 1, 2, 3, or 4. "
+            f"If you cannot determine the answer from the map, respond with 5."
         )
 
         messages = [

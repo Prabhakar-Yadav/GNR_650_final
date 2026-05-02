@@ -844,13 +844,18 @@ def main():
         print(f"    ... and {len(ocr_texts) - 10} more")
 
     # ── Step 3: Load VLM (for fallback) ───────────────────────────────────────
-    print("Loading VLM for fallback...")
-    try:
-        vlm_model, vlm_processor = load_vlm()
-        vlm_available = True
-    except (FileNotFoundError, ImportError, Exception) as e:
-        print(f"  VLM not available: {e}")
+    skip_vlm = os.environ.get('SKIP_VLM', '0') == '1'
+    if skip_vlm:
+        print("VLM skipped (SKIP_VLM=1)")
         vlm_available = False
+    else:
+        print("Loading VLM for fallback...")
+        try:
+            vlm_model, vlm_processor = load_vlm()
+            vlm_available = True
+        except (FileNotFoundError, ImportError, Exception) as e:
+            print(f"  VLM not available: {e}")
+            vlm_available = False
 
     pil_image = Image.open(map_path).convert("RGB") if vlm_available else None
 

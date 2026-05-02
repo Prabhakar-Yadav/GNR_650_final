@@ -38,10 +38,10 @@ def rotate_image(img, k):
 
 
 def detect_overlap(patches):
-    """Auto-detect the overlap between adjacent patches by testing powers of 2."""
+    """Auto-detect the overlap between adjacent patches by testing common overlap sizes."""
     p0 = patches[0]
     h, w = p0.shape[:2]
-    for ov in [64, 48, 32, 24, 16, 8, 4, 2, 1]:
+    for ov in [64, 48, 32, 24, 16, 8, 4, 2]:
         if ov >= w:
             continue
         right_strip = p0[:, -ov:, :].astype(np.float32)
@@ -53,7 +53,8 @@ def detect_overlap(patches):
                 mse = np.mean((right_strip - left_strip) ** 2)
                 if mse < 1.0:
                     return ov
-    return 0
+    # Fallback: use single-pixel edge matching (no overlap)
+    return 1
 
 
 def stitch_patches(patches, n_rows, n_cols, overlap):
@@ -61,7 +62,9 @@ def stitch_patches(patches, n_rows, n_cols, overlap):
     Stitch patches using overlap-based constraint propagation with backtracking.
     patch_0 is always top-left (no rotation).
     """
+    import time as _time
     THRESH = 5.0
+    TIMEOUT = 300  # 5 minutes max for backtracking
     n_patches = len(patches)
 
     # Precompute edge strips for all patch/rotation combos
@@ -102,6 +105,7 @@ def stitch_patches(patches, n_rows, n_cols, overlap):
     # Solve placement with backtracking
     grid = [[None] * n_cols for _ in range(n_rows)]
     grid[0][0] = (0, 0)
+    _start_time = _time.time()
 
     def get_candidates(row, col, used_patches):
         candidates = None
@@ -116,6 +120,8 @@ def stitch_patches(patches, n_rows, n_cols, overlap):
         return candidates if candidates is not None else set()
 
     def solve(pos, used_patches):
+        if _time.time() - _start_time > TIMEOUT:
+            return False
         if pos == n_patches:
             return True
         row = pos // n_cols
@@ -283,7 +289,7 @@ def answer_questions_with_vlm(map_image_path, test_csv_path, model_name=None):
         ).to(model.device)
 
         with torch.no_grad():
-            generated_ids = model.generate(**inputs, max_new_tokens=16, temperature=0.0, do_sample=False)
+            generated_ids = model.generate(**inputs, max_new_tokens=16, do_sample=False)
 
         generated_ids_trimmed = [
             out_ids[len(in_ids):] for in_ids, out_ids in zip(inputs.input_ids, generated_ids)

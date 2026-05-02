@@ -16,6 +16,8 @@ fi
 cp "$REPO_DIR/inference.py" ./inference.py
 
 # ─── 2. Create conda environment (Python 3.11, name: gnr_project_env) ─────────
+# Remove if already exists (grading system runs conda remove at end, but handle re-runs)
+conda remove --name gnr_project_env --all -y 2>/dev/null || true
 conda create -n gnr_project_env python=3.11 -y
 
 # ─── 3. Install all dependencies ──────────────────────────────────────────────

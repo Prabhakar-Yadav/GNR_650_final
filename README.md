@@ -131,8 +131,17 @@ conda activate gnr_project_env
 
 **3. Run inference:**
 ```bash
-python inference.py --test_dir <absolute_path_to_test_dir>
+python inference.py --test_dir <path_to_test_dir>
 ```
+Where `<path_to_test_dir>` is the directory containing `patches/` and `test.csv`.
+
+For grading: the test directory will be provided by the evaluator, e.g.:
+```bash
+python inference.py --test_dir /grading/test_data
+# or
+python inference.py --test_dir ../test_data
+```
+
 This produces `submission.csv` in the current directory.
 
 ### What setup.bash does

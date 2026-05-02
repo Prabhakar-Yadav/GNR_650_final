@@ -800,12 +800,36 @@ def answer_with_vlm(model, processor, pil_image, question, options, ocr_context=
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--test_dir", required=True, help="Path to test directory")
+    parser.add_argument("--test_dir", default=None, help="Path to test directory")
     args = parser.parse_args()
 
-    test_dir = Path(args.test_dir)
+    # Support multiple ways to specify test directory
+    test_dir = None
+    if args.test_dir:
+        test_dir = Path(args.test_dir)
+    else:
+        # Try environment variable
+        env_test_dir = os.environ.get('TEST_DIR')
+        if env_test_dir:
+            test_dir = Path(env_test_dir)
+        # Try common locations
+        else:
+            for candidate in ['./test', './test_data', '../test', '../test_data']:
+                if Path(candidate).exists():
+                    test_dir = Path(candidate)
+                    break
+
+    if test_dir is None or not test_dir.exists():
+        raise FileNotFoundError(
+            "Test directory not found. Specify with: --test_dir <path>\n"
+            "Or set TEST_DIR environment variable\n"
+            "Or place test data in ./test or ./test_data"
+        )
+
     patches_dir = test_dir / "patches"
     test_csv = test_dir / "test.csv"
+
+    print(f"Using test directory: {test_dir}")
 
     # ── Step 1: Stitch map ────────────────────────────────────────────────────
     print("Loading patches...")

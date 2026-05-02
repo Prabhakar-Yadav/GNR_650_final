@@ -849,6 +849,22 @@ def load_vlm():
                 min_pixels=min_pixels,
                 max_pixels=max_pixels,
             )
+            # Repair AWQ integer tensors that may have been cast to float by
+            # torch_dtype. qweight and qzeros must stay int32 for awq_ext.
+            if strat.get("is_awq"):
+                try:
+                    from awq.modules.linear.gemm import WQLinear_GEMM
+                    for module in model.modules():
+                        if isinstance(module, WQLinear_GEMM):
+                            if hasattr(module, "qweight") and module.qweight.dtype != torch.int32:
+                                module.qweight = module.qweight.to(torch.int32)
+                            if hasattr(module, "qzeros") and module.qzeros.dtype != torch.int32:
+                                module.qzeros = module.qzeros.to(torch.int32)
+                            if hasattr(module, "scales") and module.scales.dtype != torch.float16:
+                                module.scales = module.scales.to(torch.float16)
+                    print("AWQ int32 tensors verified/repaired")
+                except Exception as _awq_e:
+                    print(f"AWQ repair skipped: {_awq_e}")
             print(f"VLM loaded: {strat['desc']}")
             return model, processor
         except Exception as e:

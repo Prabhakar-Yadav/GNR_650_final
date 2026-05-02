@@ -246,21 +246,22 @@ def extract_text_from_map(map_image_path):
     run_ocr_on_image(img)
 
     # Run OCR on overlapping 3x3 subregions at 2x scale for small text
-    n_div = 3
-    step_x = w // n_div
-    step_y = h // n_div
-    pad_x = step_x // 3  # overlap
-    pad_y = step_y // 3
-    for gy in range(n_div):
-        for gx in range(n_div):
-            x1 = max(0, gx * step_x - pad_x)
-            y1 = max(0, gy * step_y - pad_y)
-            x2 = min(w, (gx + 1) * step_x + pad_x)
-            y2 = min(h, (gy + 1) * step_y + pad_y)
-            crop = img[y1:y2, x1:x2]
-            upscaled = cv2.resize(crop, (crop.shape[1] * 2, crop.shape[0] * 2),
-                                  interpolation=cv2.INTER_CUBIC)
-            run_ocr_on_image(upscaled, offset_x=x1, offset_y=y1, scale=2.0)
+    for n_div, scale in [(3, 2.0), (4, 3.0)]:
+        step_x = w // n_div
+        step_y = h // n_div
+        pad_x = step_x // 3
+        pad_y = step_y // 3
+        for gy in range(n_div):
+            for gx in range(n_div):
+                x1 = max(0, gx * step_x - pad_x)
+                y1 = max(0, gy * step_y - pad_y)
+                x2 = min(w, (gx + 1) * step_x + pad_x)
+                y2 = min(h, (gy + 1) * step_y + pad_y)
+                crop = img[y1:y2, x1:x2]
+                s = int(scale)
+                upscaled = cv2.resize(crop, (crop.shape[1] * s, crop.shape[0] * s),
+                                      interpolation=cv2.INTER_CUBIC)
+                run_ocr_on_image(upscaled, offset_x=x1, offset_y=y1, scale=scale)
 
     # Deduplicate
     deduped = []
@@ -276,7 +277,49 @@ def extract_text_from_map(map_image_path):
         if not is_dup:
             deduped.append(t)
 
+    # Merge horizontally adjacent short tokens into compound labels
+    deduped = merge_adjacent_labels(deduped)
+
     return deduped, h, w
+
+
+def merge_adjacent_labels(texts):
+    """Merge OCR tokens that are spatially adjacent into compound labels."""
+    if not texts:
+        return texts
+    merged_flags = [False] * len(texts)
+    result = []
+    texts_sorted = sorted(texts, key=lambda t: (round(t["cy"] / 15), t["cx"]))
+    for i, t in enumerate(texts_sorted):
+        if merged_flags[i]:
+            continue
+        best_j = None
+        best_dx = float("inf")
+        avg_char_w = max(8, len(t["text"]) and (20))
+        for j, t2 in enumerate(texts_sorted):
+            if i == j or merged_flags[j]:
+                continue
+            dy = abs(t2["cy"] - t["cy"])
+            dx = t2["cx"] - t["cx"]
+            if dy < 12 and 0 < dx < avg_char_w * (len(t["text"]) + 2) and dx < best_dx:
+                best_dx = dx
+                best_j = j
+        if best_j is not None:
+            t2 = texts_sorted[best_j]
+            compound_text = t["text"] + " " + t2["text"]
+            merged = {
+                "text": compound_text,
+                "confidence": min(t["confidence"], t2["confidence"]),
+                "cx": (t["cx"] + t2["cx"]) / 2,
+                "cy": (t["cy"] + t2["cy"]) / 2,
+                "norm_x": (t["norm_x"] + t2["norm_x"]) / 2,
+                "norm_y": (t["norm_y"] + t2["norm_y"]) / 2,
+            }
+            result.append(merged)
+            merged_flags[best_j] = True
+        else:
+            result.append(t)
+    return result
 
 
 def fuzzy_ratio(a, b):
@@ -484,29 +527,43 @@ def try_direction_answer(q_lower, options, ocr_texts):
 
     target = target_hits[0][0]
     ref = ref_hits[0][0]
-    dx = target["norm_x"] - ref["norm_x"]
-    dy = target["norm_y"] - ref["norm_y"]
+    dx = target["cx"] - ref["cx"]
+    dy = target["cy"] - ref["cy"]  # positive = down = south in image coords
 
-    computed_dir = ""
-    if dy < -0.05:
-        computed_dir += "North"
-    elif dy > 0.05:
-        computed_dir += "South"
-    if dx > 0.05:
-        computed_dir += "-East" if computed_dir else "East"
-    elif dx < -0.05:
-        computed_dir += "-West" if computed_dir else "West"
-    if not computed_dir:
-        computed_dir = "Same area"
+    # Precise bearing via atan2
+    angle = math.degrees(math.atan2(dy, dx))
+    if -22.5 <= angle < 22.5:
+        computed_dir = "East"
+    elif 22.5 <= angle < 67.5:
+        computed_dir = "South-East"
+    elif 67.5 <= angle < 112.5:
+        computed_dir = "South"
+    elif 112.5 <= angle < 157.5:
+        computed_dir = "South-West"
+    elif angle >= 157.5 or angle < -157.5:
+        computed_dir = "West"
+    elif -157.5 <= angle < -112.5:
+        computed_dir = "North-West"
+    elif -112.5 <= angle < -67.5:
+        computed_dir = "North"
+    else:
+        computed_dir = "North-East"
 
     best_i, best_score = None, 0
     for i, opt in enumerate(options):
-        score = fuzzy_ratio(computed_dir.lower(), opt.lower())
+        opt_l = opt.lower()
+        score = fuzzy_ratio(computed_dir.lower(), opt_l)
+        if computed_dir.lower() in opt_l or opt_l in computed_dir.lower():
+            score = max(score, 0.75)
+        parts = computed_dir.lower().split("-")
+        part_matches = sum(1 for p in parts if p in opt_l)
+        if part_matches:
+            score = max(score, 0.5 + 0.2 * part_matches / len(parts))
         if score > best_score:
             best_score = score
             best_i = i + 1
     if best_i is not None and best_score >= 0.4:
-        return best_i, 0.75
+        return best_i, 0.82
     return None, 0
 
 
@@ -679,6 +736,12 @@ def load_vlm():
         try:
             print(f"Loading: {strat['desc']}...")
             model_cls = resolve_vl_model_class(strat["name"])
+            extra_kwargs = {}
+            try:
+                import flash_attn  # noqa: F401
+                extra_kwargs["attn_implementation"] = "flash_attention_2"
+            except ImportError:
+                pass
             model = model_cls.from_pretrained(
                 strat["name"],
                 torch_dtype=torch.bfloat16,
@@ -686,6 +749,7 @@ def load_vlm():
                 low_cpu_mem_usage=True,
                 trust_remote_code=True,
                 local_files_only=strat["local_only"],
+                **extra_kwargs,
             )
             processor = AutoProcessor.from_pretrained(
                 strat["name"],
@@ -706,7 +770,7 @@ def load_vlm():
 
 
 def get_relevant_crop(pil_image, question, options, ocr_texts, map_h, map_w):
-    """Extract a cropped region of the map relevant to the question for better VLM accuracy."""
+    """Extract a cropped region of the map centered on relevant landmarks."""
     all_locs = []
 
     for opt in options:
@@ -714,10 +778,15 @@ def get_relevant_crop(pil_image, question, options, ocr_texts, map_h, map_w):
         if hits:
             all_locs.append((hits[0][0]["cx"], hits[0][0]["cy"]))
 
+    # Extract all capitalized noun phrases from question as landmark candidates
     keywords = re.findall(
-        r'(?:near|of|at|in|around|from|south of|north of|east of|west of)\s+([A-Z][a-zA-Z\s]+)',
+        r'(?:near|of|at|in|around|from|between|south of|north of|east of|west of)\s+([A-Z][a-zA-Z\s]+)',
         question
     )
+    # Also grab bare proper nouns
+    for word in re.findall(r'\b([A-Z][a-zA-Z]{3,}(?:\s+[A-Z][a-zA-Z]+)*)\b', question):
+        keywords.append(word)
+
     for kw in keywords:
         hits = find_text_on_map(ocr_texts, kw.strip(), threshold=0.4)
         if hits:
@@ -729,13 +798,21 @@ def get_relevant_crop(pil_image, question, options, ocr_texts, map_h, map_w):
     xs = [loc[0] for loc in all_locs]
     ys = [loc[1] for loc in all_locs]
     cx, cy = np.mean(xs), np.mean(ys)
-    margin = max(map_w, map_h) * 0.25
+
+    # Tight crop when all locs cluster; wider when spread out
+    spread = max(
+        max(xs) - min(xs) if len(xs) > 1 else 0,
+        max(ys) - min(ys) if len(ys) > 1 else 0,
+    )
+    margin = max(spread * 0.7, max(map_w, map_h) * 0.20)
+    margin = min(margin, max(map_w, map_h) * 0.40)
+
     x1 = max(0, int(cx - margin))
     y1 = max(0, int(cy - margin))
     x2 = min(map_w, int(cx + margin))
     y2 = min(map_h, int(cy + margin))
 
-    if (x2 - x1) < map_w * 0.15 or (y2 - y1) < map_h * 0.15:
+    if (x2 - x1) < map_w * 0.12 or (y2 - y1) < map_h * 0.12:
         return None
 
     return pil_image.crop((x1, y1, x2, y2))
@@ -758,7 +835,8 @@ def run_vlm_inference(model, processor, image, prompt_text):
     ).to(model.device)
 
     with torch.no_grad():
-        generated_ids = model.generate(**inputs, max_new_tokens=32, do_sample=False)
+        generated_ids = model.generate(**inputs, max_new_tokens=64, do_sample=False,
+                                       temperature=None, top_p=None)
 
     trimmed = [out[len(inp):] for inp, out in zip(inputs.input_ids, generated_ids)]
     return processor.batch_decode(trimmed, skip_special_tokens=True,
@@ -799,64 +877,114 @@ def get_question_id(row):
     raise KeyError("test.csv must contain one of: id, question_id, question_num")
 
 
+def build_ocr_hint(question, options, ocr_texts):
+    """Build a compact OCR hint string with per-option spatial locations."""
+    if not ocr_texts:
+        return ""
+    keywords = set()
+    for word in re.findall(r'[A-Z][a-zA-Z]+', question):
+        keywords.add(word.lower())
+    for opt in options:
+        for word in re.findall(r'[A-Z][a-zA-Z]+', opt):
+            keywords.add(word.lower())
+
+    # Per-option location hints
+    opt_locs = []
+    for i, opt in enumerate(options):
+        hits = find_text_on_map(ocr_texts, opt, threshold=0.4)
+        if hits:
+            t = hits[0][0]
+            zone = "-".join(get_spatial_zone(t["norm_x"], t["norm_y"]))
+            pct_x = int(t["norm_x"] * 100)
+            pct_y = int(t["norm_y"] * 100)
+            opt_locs.append(f"  Option {i+1} ({opt}): found on map at ~{pct_x}% from left, {pct_y}% from top ({zone})")
+
+    # Relevant background labels
+    relevant = []
+    for t in sorted(ocr_texts, key=lambda x: -x["confidence"])[:120]:
+        text_l = t["text"].lower()
+        if any(kw in text_l for kw in keywords) or t["confidence"] >= 0.80:
+            zone = "-".join(get_spatial_zone(t["norm_x"], t["norm_y"]))
+            relevant.append(f'"{t["text"]}" ({zone})')
+
+    hint_parts = []
+    if opt_locs:
+        hint_parts.append("Option locations on map:\n" + "\n".join(opt_locs))
+    if relevant:
+        hint_parts.append("Map labels: " + ", ".join(relevant[:50]))
+    if hint_parts:
+        return "\n\n" + "\n\n".join(hint_parts) + "\n"
+    return ""
+
+
 def answer_with_vlm(model, processor, pil_image, question, options, ocr_context="",
                      ocr_texts=None, map_h=0, map_w=0):
     opt_str = "\n".join(f"{i+1}. {opt}" for i, opt in enumerate(options))
+    ocr_hint = build_ocr_hint(question, options, ocr_texts) if ocr_texts else ""
 
-    # Build a focused OCR hint: only labels that appear in the question or options
-    ocr_hint = ""
-    if ocr_context and ocr_texts:
-        relevant = []
-        keywords = set()
-        for word in re.findall(r'[A-Z][a-zA-Z]+', question):
-            keywords.add(word.lower())
-        for opt in options:
-            for word in re.findall(r'[A-Z][a-zA-Z]+', opt):
-                keywords.add(word.lower())
-        for t in sorted(ocr_texts, key=lambda x: -x["confidence"])[:120]:
-            if any(kw in t["text"].lower() for kw in keywords) or t["confidence"] >= 0.75:
-                zone = "-".join(get_spatial_zone(t["norm_x"], t["norm_y"]))
-                relevant.append(f'"{t["text"]}" ({zone})')
-        if relevant:
-            ocr_hint = f"\n\nMap text labels (OCR):\n" + ", ".join(relevant[:60]) + "\n"
+    def make_prompt(image_desc, q, opts_str, hint):
+        return (
+            f"You are a geographic expert analyzing a detailed map of Mumbai, India. "
+            f"The map shows lakes, rivers, roads, buildings, and labeled landmarks. "
+            f"{image_desc}{hint}\n"
+            f"Question: {q}\n\n"
+            f"Options:\n{opts_str}\n\n"
+            f"Study the map labels and spatial positions carefully. "
+            f"Think step by step: identify where each option is located on the map, "
+            f"then pick the one that best answers the question. "
+            f"Respond with ONLY the single digit 1, 2, 3, or 4."
+        )
 
-    prompt = (
-        f"You are analyzing a detailed geographic map of Mumbai, India. "
-        f"The map shows lakes, roads, buildings, and labeled landmarks.{ocr_hint}\n\n"
-        f"Question: {question}\n\n"
-        f"Options:\n{opt_str}\n\n"
-        f"Look carefully at the map labels and spatial positions. "
-        f"Respond with ONLY the digit of the correct option: 1, 2, 3, or 4."
-    )
-
-    full_raw = run_vlm_inference(model, processor, pil_image, prompt)
+    full_prompt = make_prompt("", question, opt_str, ocr_hint)
+    full_raw = run_vlm_inference(model, processor, pil_image, full_prompt)
     full_answer = parse_vlm_answer(full_raw)
 
-    # Cropped region for small-text questions
+    # Cropped region pass
     crop_answer = None
     crop_raw = ""
     if ocr_texts and map_h > 0:
         crop = get_relevant_crop(pil_image, question, options, ocr_texts, map_h, map_w)
         if crop is not None:
-            crop_prompt = (
-                f"This is a zoomed-in section of a Mumbai geographic map.{ocr_hint}\n\n"
-                f"Question: {question}\n\n"
-                f"Options:\n{opt_str}\n\n"
-                f"Respond with ONLY the digit of the correct option: 1, 2, 3, or 4."
+            crop_prompt = make_prompt(
+                "This is a zoomed-in section of the map. ",
+                question, opt_str, ocr_hint
             )
             crop_raw = run_vlm_inference(model, processor, crop, crop_prompt)
             crop_answer = parse_vlm_answer(crop_raw)
 
-    # Both agree → high confidence
-    if crop_answer is not None and crop_answer == full_answer and crop_answer != 5:
-        return full_answer, f"VLM-both={full_raw!r}"
-    # Full says 5 but crop has answer → use crop
+    # Anti-position-bias: if answer is not 1 and full/crop agree on non-1,
+    # do a third pass with options shuffled to verify
+    candidates = [a for a in [full_answer, crop_answer] if a is not None and a != 5]
+    agreed = full_answer if (crop_answer is not None and full_answer == crop_answer and full_answer != 5) else None
+
+    if agreed is not None:
+        if agreed != 1:
+            # Shuffle options: put agreed-option first to see if it still wins
+            shuffled_map = list(range(len(options)))
+            shuffled_map.insert(0, shuffled_map.pop(agreed - 1))
+            shuffled_opts = [options[i] for i in shuffled_map]
+            shuffled_str = "\n".join(f"{i+1}. {opt}" for i, opt in enumerate(shuffled_opts))
+            verify_prompt = make_prompt("", question, shuffled_str, ocr_hint)
+            verify_raw = run_vlm_inference(model, processor, pil_image, verify_prompt)
+            verify_parsed = parse_vlm_answer(verify_raw)
+            if verify_parsed != 5:
+                actual_answer = shuffled_map[verify_parsed - 1] + 1
+                if actual_answer == agreed:
+                    return agreed, f"VLM-verified={full_raw!r}"
+                # Disagreement — return majority of three
+                votes = {}
+                for v in [full_answer, crop_answer if crop_answer else full_answer, actual_answer]:
+                    votes[v] = votes.get(v, 0) + 1
+                winner = max(votes, key=votes.get)
+                return winner, f"VLM-majority={full_raw!r}"
+        return agreed, f"VLM-both={full_raw!r}"
+
     if full_answer == 5 and crop_answer is not None and crop_answer != 5:
         return crop_answer, f"VLM-crop={crop_raw!r}"
-    # Both non-5 but disagree → trust full image (more context)
     if full_answer != 5:
         return full_answer, f"VLM-full={full_raw!r}"
-    # Both 5 → return 5
+    if crop_answer is not None and crop_answer != 5:
+        return crop_answer, f"VLM-crop={crop_raw!r}"
     return 5, f"VLM-skip full={full_raw!r}"
 
 
@@ -972,7 +1100,7 @@ def main():
         ocr_answer, ocr_conf = answer_with_ocr(question, options, ocr_texts, map_h, map_w)
         risky_ocr = should_defer_ocr_to_vlm(question)
 
-        if ocr_answer is not None and ocr_conf >= 0.85 and (not risky_ocr or not vlm_available):
+        if ocr_answer is not None and ocr_conf >= 0.85 and not risky_ocr:
             answer = ocr_answer
             method = f"OCR (conf={ocr_conf:.2f})"
         elif vlm_available:
@@ -986,12 +1114,26 @@ def main():
                 vlm_available = False
                 vlm_ans, raw = 5, f"VLM-error={type(e).__name__}"
 
-            if vlm_ans == 5 and ocr_answer is not None and ocr_conf >= 0.60:
+            if vlm_ans == 5 and ocr_answer is not None and ocr_conf >= 0.55:
                 answer = ocr_answer
                 method = f"OCR-fallback (conf={ocr_conf:.2f})"
-            elif vlm_ans == 5 and ocr_answer is not None and ocr_conf >= 0.45:
+            elif vlm_ans == 5 and ocr_answer is not None and ocr_conf >= 0.40:
                 answer = ocr_answer
                 method = f"OCR-emergency (conf={ocr_conf:.2f})"
+            elif vlm_ans == 5:
+                # Last resort: pick option with best OCR match score
+                best_opt, best_sc = None, 0
+                for i, opt in enumerate(options):
+                    hits = find_text_on_map(ocr_texts, opt, threshold=0.3)
+                    if hits and hits[0][1] > best_sc:
+                        best_sc = hits[0][1]
+                        best_opt = i + 1
+                if best_opt is not None and best_sc >= 0.35:
+                    answer = best_opt
+                    method = f"OCR-best-match (sc={best_sc:.2f})"
+                else:
+                    answer = 5
+                    method = "SKIP"
             else:
                 answer = vlm_ans
                 method = f"VLM ({raw})"

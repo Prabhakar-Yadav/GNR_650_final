@@ -245,18 +245,22 @@ def extract_text_from_map(map_image_path):
     # Run OCR on full image
     run_ocr_on_image(img)
 
-    # Also run OCR on upscaled quadrants for small text
-    quadrants = [
-        (0, 0, w // 2, h // 2),
-        (w // 2, 0, w, h // 2),
-        (0, h // 2, w // 2, h),
-        (w // 2, h // 2, w, h),
-    ]
-    for x1, y1, x2, y2 in quadrants:
-        crop = img[y1:y2, x1:x2]
-        upscaled = cv2.resize(crop, (crop.shape[1] * 2, crop.shape[0] * 2),
-                              interpolation=cv2.INTER_CUBIC)
-        run_ocr_on_image(upscaled, offset_x=x1, offset_y=y1, scale=2.0)
+    # Run OCR on overlapping 3x3 subregions at 2x scale for small text
+    n_div = 3
+    step_x = w // n_div
+    step_y = h // n_div
+    pad_x = step_x // 3  # overlap
+    pad_y = step_y // 3
+    for gy in range(n_div):
+        for gx in range(n_div):
+            x1 = max(0, gx * step_x - pad_x)
+            y1 = max(0, gy * step_y - pad_y)
+            x2 = min(w, (gx + 1) * step_x + pad_x)
+            y2 = min(h, (gy + 1) * step_y + pad_y)
+            crop = img[y1:y2, x1:x2]
+            upscaled = cv2.resize(crop, (crop.shape[1] * 2, crop.shape[0] * 2),
+                                  interpolation=cv2.INTER_CUBIC)
+            run_ocr_on_image(upscaled, offset_x=x1, offset_y=y1, scale=2.0)
 
     # Deduplicate
     deduped = []
@@ -343,56 +347,62 @@ def answer_with_ocr(question, options, ocr_texts, map_h, map_w):
     """
     q_lower = question.lower()
 
-    # Strategy 1: Which option text appears on the map?
-    option_scores = []
+    # Get OCR matches for all options
+    option_data = []
     for i, opt in enumerate(options):
         matches = find_text_on_map(ocr_texts, opt, threshold=0.45)
         best_score = matches[0][1] if matches else 0
         best_match = matches[0][0] if matches else None
-        option_scores.append((i + 1, best_score, best_match, opt))
+        option_data.append((i + 1, best_score, best_match, opt))
 
-    # Sort by match score descending
-    option_scores.sort(key=lambda x: -x[1])
+    # ── Strategy 0: Direction questions ("direction of X from Y") ────────────
+    dir_answer, dir_conf = try_direction_answer(q_lower, options, ocr_texts)
+    if dir_answer is not None:
+        return dir_answer, dir_conf
 
-    # If one option clearly matches and others don't, use it
-    if option_scores[0][1] >= 0.55:
-        top_score = option_scores[0][1]
-        second_score = option_scores[1][1] if len(option_scores) > 1 else 0
+    # ── Strategy 1: "between X and Y" questions ─────────────────────────────
+    between_answer, between_conf = try_between_answer(q_lower, option_data, ocr_texts)
+    if between_answer is not None:
+        return between_answer, between_conf
 
-        # Spatial constraint check
+    # ── Strategy 2: Direct text match with spatial awareness ─────────────────
+    option_data_sorted = sorted(option_data, key=lambda x: -x[1])
+
+    if option_data_sorted[0][1] >= 0.55:
+        top_idx, top_score, top_match, top_opt = option_data_sorted[0]
+        second_score = option_data_sorted[1][1] if len(option_data_sorted) > 1 else 0
+        gap = top_score - second_score
+
         spatial_keywords = extract_spatial_keywords(q_lower)
-        if spatial_keywords and option_scores[0][2]:
-            match_entry = option_scores[0][2]
-            zones = get_spatial_zone(match_entry["norm_x"], match_entry["norm_y"])
+        if spatial_keywords and top_match:
+            zones = get_spatial_zone(top_match["norm_x"], top_match["norm_y"])
             spatial_ok = check_spatial_match(spatial_keywords, zones)
             if not spatial_ok:
-                # Top match doesn't satisfy spatial constraint
-                # Check if any other option does
-                for idx, score, match, opt in option_scores[1:]:
-                    if score >= 0.45 and match:
+                for idx, score, match, opt in option_data_sorted[1:]:
+                    if score >= 0.5 and match:
                         zones2 = get_spatial_zone(match["norm_x"], match["norm_y"])
                         if check_spatial_match(spatial_keywords, zones2):
                             return idx, 0.7
-                # Still return top match but lower confidence
-                return option_scores[0][0], 0.5
+                return None, 0
 
-        # Clear winner
-        if top_score - second_score > 0.15:
-            return option_scores[0][0], min(0.95, top_score)
+        # Spatial confirmation bonus: if question specifies region AND the top
+        # match is confirmed to be in that region, we can be slightly more trusting
+        spatial_bonus = 0
+        if spatial_keywords and top_match:
+            zones = get_spatial_zone(top_match["norm_x"], top_match["norm_y"])
+            if check_spatial_match(spatial_keywords, zones):
+                spatial_bonus = 0.05
 
-        # Multiple matches - use spatial to disambiguate
-        if spatial_keywords:
-            for idx, score, match, opt in option_scores:
-                if score >= 0.45 and match:
-                    zones = get_spatial_zone(match["norm_x"], match["norm_y"])
-                    if check_spatial_match(spatial_keywords, zones):
-                        return idx, 0.75
+        if top_score >= 0.95 and gap >= max(0.05, 0.1 - spatial_bonus):
+            return top_idx, 0.9
+        elif top_score >= 0.85 and gap >= max(0.15, 0.2 - spatial_bonus):
+            return top_idx, 0.8
+        elif top_score >= 0.8 and gap >= max(0.25, 0.3 - spatial_bonus):
+            return top_idx, 0.7
 
-        # Just return best match
-        if top_score >= 0.55:
-            return option_scores[0][0], top_score * 0.8
+        return None, 0
 
-    # Strategy 2: "near" / "between" / proximity questions
+    # ── Strategy 3: Proximity questions ──────────────────────────────────────
     if any(kw in q_lower for kw in ["near", "close", "adjacent", "nearest", "next to"]):
         subject = extract_subject_near(q_lower)
         if subject:
@@ -415,16 +425,106 @@ def answer_with_ocr(question, options, ocr_texts, map_h, map_w):
                 if best_opt is not None and found_any:
                     return best_opt, 0.8
 
-    # Strategy 3: Directional questions - "direction of X from Y"
-    if any(d in q_lower for d in ["direction", "north-east", "south-west", "north", "south", "east", "west"]):
-        # Check if it's asking about relative direction
-        for i, opt in enumerate(options):
-            opt_lower = opt.lower()
-            if "north" in opt_lower or "south" in opt_lower or "east" in opt_lower or "west" in opt_lower:
-                # This is likely a direction answer
-                # Find the two locations mentioned and compute direction
-                pass  # Handled by spatial zone matching above
+    return None, 0
 
+
+def try_direction_answer(q_lower, options, ocr_texts):
+    """Handle 'general direction of X from Y' or 'X is ___ of Y' questions."""
+    direction_opts = []
+    for i, opt in enumerate(options):
+        ol = opt.lower()
+        if any(d in ol for d in ["north", "south", "east", "west"]):
+            direction_opts.append(i)
+
+    if len(direction_opts) < 2:
+        return None, 0
+
+    locations = re.findall(
+        r'(?:direction of|direction from)\s+(.+?)\s+(?:from|to)\s+(.+?)[\?]',
+        q_lower
+    )
+    if not locations:
+        locations = re.findall(
+            r'(.+?)\s+(?:from|relative to)\s+(.+?)[\?]',
+            q_lower
+        )
+    if not locations:
+        place_match = re.search(
+            r'(?:direction|general direction)\s+of\s+(.+?)\s+from\s+(.+?)[\?]',
+            q_lower
+        )
+        if place_match:
+            locations = [(place_match.group(1), place_match.group(2))]
+
+    if not locations:
+        return None, 0
+
+    target_name, ref_name = locations[0]
+    target_hits = find_text_on_map(ocr_texts, target_name.strip(), threshold=0.4)
+    ref_hits = find_text_on_map(ocr_texts, ref_name.strip(), threshold=0.4)
+
+    if not target_hits or not ref_hits:
+        return None, 0
+
+    target = target_hits[0][0]
+    ref = ref_hits[0][0]
+    dx = target["norm_x"] - ref["norm_x"]
+    dy = target["norm_y"] - ref["norm_y"]
+
+    computed_dir = ""
+    if dy < -0.05:
+        computed_dir += "North"
+    elif dy > 0.05:
+        computed_dir += "South"
+    if dx > 0.05:
+        computed_dir += "-East" if computed_dir else "East"
+    elif dx < -0.05:
+        computed_dir += "-West" if computed_dir else "West"
+    if not computed_dir:
+        computed_dir = "Same area"
+
+    best_i, best_score = None, 0
+    for i, opt in enumerate(options):
+        score = fuzzy_ratio(computed_dir.lower(), opt.lower())
+        if score > best_score:
+            best_score = score
+            best_i = i + 1
+    if best_i is not None and best_score >= 0.4:
+        return best_i, 0.75
+    return None, 0
+
+
+def try_between_answer(q_lower, option_data, ocr_texts):
+    """Handle 'between X and Y' questions using midpoint proximity."""
+    m = re.search(r'between\s+(.+?)\s+and\s+(.+?)[\?\s]', q_lower)
+    if not m:
+        return None, 0
+
+    loc_a_name = m.group(1).strip()
+    loc_b_name = m.group(2).strip()
+    a_hits = find_text_on_map(ocr_texts, loc_a_name, threshold=0.4)
+    b_hits = find_text_on_map(ocr_texts, loc_b_name, threshold=0.4)
+    if not a_hits or not b_hits:
+        return None, 0
+
+    a_loc = a_hits[0][0]
+    b_loc = b_hits[0][0]
+    mid_x = (a_loc["cx"] + b_loc["cx"]) / 2
+    mid_y = (a_loc["cy"] + b_loc["cy"]) / 2
+
+    best_opt, min_dist = None, float("inf")
+    found_any = False
+    for idx, score, match, opt in option_data:
+        opt_hits = find_text_on_map(ocr_texts, opt, threshold=0.4)
+        if opt_hits:
+            found_any = True
+            oloc = opt_hits[0][0]
+            dist = ((mid_x - oloc["cx"]) ** 2 + (mid_y - oloc["cy"]) ** 2) ** 0.5
+            if dist < min_dist:
+                min_dist = dist
+                best_opt = idx
+    if best_opt is not None and found_any:
+        return best_opt, 0.75
     return None, 0
 
 
@@ -494,30 +594,49 @@ def load_vlm():
     return model, processor
 
 
-def answer_with_vlm(model, processor, pil_image, question, options, ocr_context=""):
+def get_relevant_crop(pil_image, question, options, ocr_texts, map_h, map_w):
+    """Extract a cropped region of the map relevant to the question for better VLM accuracy."""
+    all_locs = []
+
+    for opt in options:
+        hits = find_text_on_map(ocr_texts, opt, threshold=0.4)
+        if hits:
+            all_locs.append((hits[0][0]["cx"], hits[0][0]["cy"]))
+
+    keywords = re.findall(
+        r'(?:near|of|at|in|around|from|south of|north of|east of|west of)\s+([A-Z][a-zA-Z\s]+)',
+        question
+    )
+    for kw in keywords:
+        hits = find_text_on_map(ocr_texts, kw.strip(), threshold=0.4)
+        if hits:
+            all_locs.append((hits[0][0]["cx"], hits[0][0]["cy"]))
+
+    if not all_locs:
+        return None
+
+    xs = [loc[0] for loc in all_locs]
+    ys = [loc[1] for loc in all_locs]
+    cx, cy = np.mean(xs), np.mean(ys)
+    margin = max(map_w, map_h) * 0.25
+    x1 = max(0, int(cx - margin))
+    y1 = max(0, int(cy - margin))
+    x2 = min(map_w, int(cx + margin))
+    y2 = min(map_h, int(cy + margin))
+
+    if (x2 - x1) < map_w * 0.15 or (y2 - y1) < map_h * 0.15:
+        return None
+
+    return pil_image.crop((x1, y1, x2, y2))
+
+
+def run_vlm_inference(model, processor, image, prompt_text):
+    """Run VLM inference on an image with a text prompt. Returns raw output string."""
     from qwen_vl_utils import process_vision_info
 
-    opt_str = "\n".join(f"{i+1}. {opt}" for i, opt in enumerate(options))
-
-    ocr_hint = ""
-    if ocr_context:
-        ocr_hint = (
-            f"\n\nHere are some text labels detected on the map for reference:\n{ocr_context}\n"
-        )
-
-    prompt = (
-        f"This is a detailed geographic map showing streets, water bodies, landmarks, and labeled locations. "
-        f"Read all the text labels carefully including small ones.{ocr_hint}\n\n"
-        f"Question: {question}\n\n"
-        f"Options:\n{opt_str}\n\n"
-        f"Instructions: Based on the map labels and features visible in the image, pick the best answer. "
-        f"Respond with ONLY a single digit: 1, 2, 3, or 4. "
-        f"If you cannot determine the answer, respond with 5."
-    )
-
     messages = [{"role": "user", "content": [
-        {"type": "image", "image": pil_image},
-        {"type": "text", "text": prompt},
+        {"type": "image", "image": image},
+        {"type": "text", "text": prompt_text},
     ]}]
 
     text = processor.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
@@ -531,15 +650,65 @@ def answer_with_vlm(model, processor, pil_image, question, options, ocr_context=
         generated_ids = model.generate(**inputs, max_new_tokens=16, do_sample=False)
 
     trimmed = [out[len(inp):] for inp, out in zip(inputs.input_ids, generated_ids)]
-    output_text = processor.batch_decode(trimmed, skip_special_tokens=True,
-                                          clean_up_tokenization_spaces=False)[0].strip()
+    return processor.batch_decode(trimmed, skip_special_tokens=True,
+                                  clean_up_tokenization_spaces=False)[0].strip()
 
-    answer = 5
+
+def parse_vlm_answer(output_text):
+    """Parse a 1-5 answer from VLM output text."""
     for ch in output_text:
         if ch in "12345":
-            answer = int(ch)
-            break
-    return answer, output_text
+            return int(ch)
+    return 5
+
+
+def answer_with_vlm(model, processor, pil_image, question, options, ocr_context="",
+                     ocr_texts=None, map_h=0, map_w=0):
+    opt_str = "\n".join(f"{i+1}. {opt}" for i, opt in enumerate(options))
+
+    ocr_hint = ""
+    if ocr_context:
+        ocr_hint = (
+            f"\n\nText labels detected on the map via OCR:\n{ocr_context}\n"
+        )
+
+    prompt = (
+        f"You are a geographic map analysis expert. This image shows a detailed map with labeled "
+        f"streets, water bodies, landmarks, institutional buildings, and geographic features. "
+        f"Pay close attention to ALL text labels on the map, including small ones.{ocr_hint}\n\n"
+        f"Question: {question}\n\n"
+        f"Options:\n{opt_str}\n\n"
+        f"Think about what is visible on the map. Pick the option that best matches what the map shows. "
+        f"Respond with ONLY a single digit: 1, 2, 3, or 4. "
+        f"If you truly cannot determine the answer, respond with 5."
+    )
+
+    # Run on full image
+    full_raw = run_vlm_inference(model, processor, pil_image, prompt)
+    full_answer = parse_vlm_answer(full_raw)
+
+    # Also run on a cropped region for potentially better accuracy on small text
+    crop_answer = None
+    if ocr_texts and map_h > 0:
+        crop = get_relevant_crop(pil_image, question, options, ocr_texts, map_h, map_w)
+        if crop is not None:
+            crop_prompt = (
+                f"This is a zoomed-in section of a geographic map. Read ALL text labels carefully.{ocr_hint}\n\n"
+                f"Question: {question}\n\n"
+                f"Options:\n{opt_str}\n\n"
+                f"Answer with ONLY a single digit: 1, 2, 3, or 4. If unsure, respond with 5."
+            )
+            crop_raw = run_vlm_inference(model, processor, crop, crop_prompt)
+            crop_answer = parse_vlm_answer(crop_raw)
+
+    # If both agree, high confidence. If they disagree, prefer full image (more context).
+    if crop_answer is not None and crop_answer != 5:
+        if crop_answer == full_answer:
+            return full_answer, f"VLM-both={full_raw!r}"
+        if full_answer == 5:
+            return crop_answer, f"VLM-crop={crop_raw!r}"
+
+    return full_answer, f"VLM-full={full_raw!r}"
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -602,10 +771,14 @@ def main():
 
     pil_image = Image.open(map_path).convert("RGB") if vlm_available else None
 
-    # Build OCR context string for VLM prompts
-    ocr_context_str = ", ".join(
-        t["text"] for t in sorted(ocr_texts, key=lambda x: -x["confidence"])[:60]
-    )
+    # Build OCR context string with locations for VLM prompts
+    sorted_ocr = sorted(ocr_texts, key=lambda x: -x["confidence"])[:80]
+    ocr_lines = []
+    for t in sorted_ocr:
+        zone = get_spatial_zone(t["norm_x"], t["norm_y"])
+        zone_str = "-".join(zone)
+        ocr_lines.append(f'"{t["text"]}" ({zone_str})')
+    ocr_context_str = ", ".join(ocr_lines)
 
     # ── Step 4: Answer questions ──────────────────────────────────────────────
     print("Answering questions...")
@@ -624,11 +797,11 @@ def main():
             answer = ocr_answer
             method = f"OCR (conf={ocr_conf:.2f})"
         elif vlm_available:
-            # VLM fallback with OCR context hints
             answer, raw = answer_with_vlm(
-                vlm_model, vlm_processor, pil_image, question, options, ocr_context_str
+                vlm_model, vlm_processor, pil_image, question, options,
+                ocr_context_str, ocr_texts, map_h, map_w,
             )
-            method = f"VLM (raw={raw!r})"
+            method = f"VLM ({raw})"
         elif ocr_answer is not None:
             answer = ocr_answer
             method = f"OCR-low (conf={ocr_conf:.2f})"

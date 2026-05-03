@@ -1008,7 +1008,7 @@ def main():
             test_dir = Path(env_test_dir)
         # Try common locations
         else:
-            for candidate in ['./test', './test_data', '../test', '../test_data']:
+            for candidate in ['./test', './test_data', '../test', '../test_data', '../test_dir', './test_dir']:
                 if Path(candidate).exists():
                     test_dir = Path(candidate)
                     break

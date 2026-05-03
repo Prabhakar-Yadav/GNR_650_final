@@ -1002,22 +1002,32 @@ def main():
     if args.test_dir:
         test_dir = Path(args.test_dir)
     else:
-        # Try environment variable
         env_test_dir = os.environ.get('TEST_DIR')
         if env_test_dir:
             test_dir = Path(env_test_dir)
-        # Try common locations
         else:
-            for candidate in ['./test', './test_data', '../test', '../test_data', '../test_dir', './test_dir']:
-                if Path(candidate).exists():
-                    test_dir = Path(candidate)
+            # Scan current dir, parent dir, and grandparent dir for any folder
+            # that contains both patches/ and test.csv — works regardless of name
+            def find_test_dir(search_root):
+                search_root = Path(search_root)
+                for candidate in search_root.iterdir():
+                    if candidate.is_dir():
+                        if (candidate / "patches").is_dir() and (candidate / "test.csv").exists():
+                            return candidate
+                return None
+
+            script_dir = Path(__file__).resolve().parent
+            for search_root in [script_dir, script_dir.parent, script_dir.parent.parent, Path.cwd(), Path.cwd().parent]:
+                found = find_test_dir(search_root)
+                if found:
+                    test_dir = found
                     break
 
     if test_dir is None or not test_dir.exists():
         raise FileNotFoundError(
             "Test directory not found. Specify with: --test_dir <path>\n"
-            "Or set TEST_DIR environment variable\n"
-            "Or place test data in ./test or ./test_data"
+            "Or set TEST_DIR environment variable.\n"
+            "Auto-discovery scans for any folder containing patches/ and test.csv."
         )
 
     patches_dir = test_dir / "patches"
